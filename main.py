@@ -14,13 +14,10 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# Geminiの設定（変数名を GEMINI_API_KEY に統一してエラーを解消しました）
+# Geminiの設定 (お使いの環境で最も安定している gemini-flash-latest を使用)
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-else:
-    print("⚠️ GEMINI_API_KEY が見つかりません。")
 
-# 判定キーワード
 JPN_MLB_KEYWORDS = ["ohtani", "yamamoto", "imanaga", "darvish", "suzuki", "yoshida", "senga", "matsui", "maeda", "kikuchi"]
 HOT_KEYWORDS = ["home run", "hr", "grand slam", "history", "record", "historic", "milestone", "walk-off"]
 
@@ -34,13 +31,11 @@ def get_stats():
 def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
-def get_npb_video(history, is_test_mode):
-    """【最優先】NPB公式スキャン（連投防止）"""
+def get_npb_video(history):
     sources = ["https://www.youtube.com/@NPB.official/videos", "https://x.com/npb"]
-    duration_limit = 600 if is_test_mode else 180
     for src in sources:
         try:
-            cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--match-filter', f'duration < {duration_limit}', '--max-downloads', '1', src]
+            cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--match-filter', 'duration < 180', '--max-downloads', '1', src]
             output = subprocess.check_output(cmd).decode().split('\n')
             if len(output) >= 3:
                 video_id = output[1]
@@ -50,7 +45,6 @@ def get_npb_video(history, is_test_mode):
     return None
 
 def get_mlb_video(history, is_test_mode):
-    """【二番手】MLB日本人スキャン（連投防止）"""
     dates_to_check = [datetime.datetime.now().strftime('%Y-%m-%d'), (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
     for date_str in dates_to_check:
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
@@ -78,7 +72,6 @@ def process_video_v5(input_url):
     input_file = "input.mp4"
     output_file = "output.mp4"
     subprocess.run(['curl', '-L', input_url, '-o', input_file])
-    # 105%ズーム ＆ 縦長化
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
     cmd = ['ffmpeg', '-i', input_file, '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file]
     subprocess.run(cmd)
@@ -94,21 +87,24 @@ def upload_video(file_path):
     except: return None
 
 def generate_caption(title, desc):
-    """【YouTubeまとめ風・語り口調・ドット排除】"""
+    """【YouTubeまとめ風・3段構成】"""
     if not GEMINI_API_KEY: return None
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        # あなたの環境で最も確実に動くモデル名に固定
+        model = genai.GenerativeModel("gemini-flash-latest")
         prompt = f"""
-        あなたは野球まとめ動画の管理人です。ニュース：『{title}』 / 『{desc}』
-        
+        あなたはYouTubeの野球まとめ解説動画の管理人です。
+        ニュース：『{title}』 / 『{desc}』
+
         以下の【構成】を守り、標準語の語り口調（〜だ、〜である）で出力せよ。
-        1. 一段目：【朗報】や【悲報】等から始まる見出し（20-30文字）。ラベル名は不要。
+        1. 一段目：【朗報】や【驚愕】等から始まる見出し（20-30文字）。
         2. 二段目：ニュースの核心を2-3行で簡潔にまとめたもの。
         3. 三段目：データやファンの反応を交えた、あなたの熱い所感。
         
         【ルール】
+        ・「概要：」「見出し：」などのラベル名は書かない。
         ・敬語禁止。
-        ・登場人物・チーム名をすべて個別に#タグ化せよ。タグ内のドット「・」は削除して詰めろ（例：#ダルビッシュ有）。
+        ・登場人物・チーム名をすべて個別に#タグ化（ドット・は削除）。
         ・合計25個以上の大量のハッシュタグを並べろ。
         
         文章のみ出力してください。
@@ -130,7 +126,6 @@ def post_reels(video_url, caption):
     for _ in range(40):
         time.sleep(20)
         status = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
-        print(f"   ステータス: {status.get('status_code')}")
         if status.get('status_code') == 'FINISHED': break
         elif status.get('status_code') == 'ERROR': return None
     publish_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
@@ -143,22 +138,16 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    print(f"探索開始 {'(テストモード)' if is_test_mode else ''}")
+    print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
+    video_data = get_npb_video(history)
     
-    # 1. NPB最優先スキャン
-    video_data = get_npb_video(history, is_test_mode)
-    
-    # 2. なければMLBスキャン
     if not video_data:
         mlb_item = get_mlb_video(history, is_test_mode)
         if mlb_item:
             total = stats['npb'] + stats['mlb']
             ratio = stats['mlb'] / total if total > 0 else 0
-            # テストモード or Hotニュース or 比率内なら採用
             if is_test_mode or mlb_item['is_hot'] or ratio < 0.3:
                 video_data = mlb_item
-                if mlb_item['is_hot']:
-                    print("🔥 MLB日本人選手の大物ニュースのため比率無視で採用")
 
     if video_data:
         print(f"🚀 ターゲット決定: {video_data['title']}")
@@ -168,18 +157,15 @@ def main():
             print(f"🔗 有効リンク発行: {public_url}")
             caption = generate_caption(video_data['title'], video_data['desc'])
             if not caption:
-                print("⚠️ AI執筆失敗のため定型文を使用します。")
                 caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
             
             result = post_reels(public_url, caption)
             if result and 'id' in result:
-                print(f"🏁 投稿成功！ ID: {result['id']}")
+                print(f"🏁 投稿成功！")
                 if not is_test_mode:
                     with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
                     stats[video_data['type']] += 1
                     save_stats(stats)
-            else: print(f"❌ 最終公開に失敗しました。")
-        else: print("❌ アップロードに失敗しました。")
     else: print("😴 新着なし")
 
 if __name__ == "__main__":
