@@ -30,4 +30,12 @@ jobs:
           INSTA_BUSINESS_ID: ${{ secrets.INSTA_BUSINESS_ID }}
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python main.py# ...（上の部分はそのまま）
         run: python main.py
+      - name: Commit history
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add history.txt
+          git commit -m "Update post history" || exit 0
+          git push
