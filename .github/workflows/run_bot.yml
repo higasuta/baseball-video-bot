@@ -32,6 +32,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py# ...（上の部分はそのまま）
         run: python main.py
+      
       - name: Commit history
         run: |
           git config --local user.email "action@github.com"
