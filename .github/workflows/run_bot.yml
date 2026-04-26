@@ -1,0 +1,33 @@
+name: Baseball Video Bot Runner
+
+on:
+  schedule:
+    # 15分おきに実行 (UTC時間なので日本時間とはズレますが15分間隔は維持されます)
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # 手動で「実行」ボタンを押せるようにする設定
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run bot script
+        env:
+          # ここでGitHubの「隠し金庫(Secrets)」をPythonに渡します
+          INSTA_BUSINESS_ID: ${{ secrets.INSTA_BUSINESS_ID }}
+          INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python main.py
