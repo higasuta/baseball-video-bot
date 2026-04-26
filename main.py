@@ -14,7 +14,6 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# Geminiの設定 (お使いの環境で最も安定している gemini-flash-latest を使用)
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
@@ -32,39 +31,51 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def get_npb_video(history):
+    """NPB公式スキャン：履歴にない動画が見つかるまで探す"""
     sources = ["https://www.youtube.com/@NPB.official/videos", "https://x.com/npb"]
     for src in sources:
+        print(f"🔍 NPBスキャン中: {src}")
         try:
-            cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--match-filter', 'duration < 180', '--max-downloads', '1', src]
+            # 最新の10件を取得して、履歴にないものを探す
+            cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--match-filter', 'duration < 180', '--playlist-end', '5', src]
             output = subprocess.check_output(cmd).decode().split('\n')
-            if len(output) >= 3:
-                video_id = output[1]
-                if video_id not in history:
-                    return {"title": output[0], "desc": "NPB公式動画", "url": output[2], "id": video_id, "type": "npb", "is_hot": False}
+            
+            # yt-dlpの結果を3行ずつ(Title, ID, URL)解析
+            for i in range(0, len(output)-2, 3):
+                title = output[i]
+                video_id = output[i+1]
+                video_url = output[i+2]
+                if video_id and video_id not in history:
+                    return {"title": title, "desc": "NPB公式最新動画", "url": video_url, "id": video_id, "type": "npb", "is_hot": False}
         except: continue
     return None
 
 def get_mlb_video(history, is_test_mode):
-    dates_to_check = [datetime.datetime.now().strftime('%Y-%m-%d'), (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
-    for date_str in dates_to_check:
+    """MLBスキャン：履歴にない日本人動画が見つかるまで探す"""
+    dates = [datetime.datetime.now().strftime('%Y-%m-%d'), (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
+    for date_str in dates:
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
             response = requests.get(url).json()
             if 'dates' not in response or not response['dates']: continue
             for game in response['dates'][0]['games']:
-                content_url = f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content"
-                content_data = requests.get(content_url).json()
+                content_data = requests.get(f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content").json()
                 if 'highlights' not in content_data['highlights']: continue
-                items = content_data['highlights']['highlights']['items']
-                for item in items:
+                for item in content_data['highlights']['highlights']['items']:
                     title = item.get('headline', '')
                     desc = item.get('description', '')
+                    video_id = str(item.get('id'))
+                    
+                    if video_id in history: continue # すでに投稿済みなら次へ
+
                     video_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                     if not video_url: continue
+
                     is_jpn = any(name in title.lower() or name in desc.lower() for name in JPN_MLB_KEYWORDS)
-                    if (is_jpn or is_test_mode) and item['id'] not in history:
+                    # 日本人、またはテストモードなら採用
+                    if is_jpn or is_test_mode:
                         is_hot = any(kw in title.lower() or kw in desc.lower() for kw in HOT_KEYWORDS)
-                        return {"title": title, "desc": desc, "url": video_url, "id": item['id'], "type": "mlb", "is_hot": is_hot}
+                        return {"title": title, "desc": desc, "url": video_url, "id": video_id, "type": "mlb", "is_hot": is_hot}
         except: continue
     return None
 
@@ -73,8 +84,7 @@ def process_video_v5(input_url):
     output_file = "output.mp4"
     subprocess.run(['curl', '-L', input_url, '-o', input_file])
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-    cmd = ['ffmpeg', '-i', input_file, '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file]
-    subprocess.run(cmd)
+    subprocess.run(['ffmpeg', '-i', input_file, '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file])
     return output_file
 
 def upload_video(file_path):
@@ -87,28 +97,10 @@ def upload_video(file_path):
     except: return None
 
 def generate_caption(title, desc):
-    """【YouTubeまとめ風・3段構成】"""
     if not GEMINI_API_KEY: return None
     try:
-        # あなたの環境で最も確実に動くモデル名に固定
         model = genai.GenerativeModel("gemini-flash-latest")
-        prompt = f"""
-        あなたはYouTubeの野球まとめ解説動画の管理人です。
-        ニュース：『{title}』 / 『{desc}』
-
-        以下の【構成】を守り、標準語の語り口調（〜だ、〜である）で出力せよ。
-        1. 一段目：【朗報】や【驚愕】等から始まる見出し（20-30文字）。
-        2. 二段目：ニュースの核心を2-3行で簡潔にまとめたもの。
-        3. 三段目：データやファンの反応を交えた、あなたの熱い所感。
-        
-        【ルール】
-        ・「概要：」「見出し：」などのラベル名は書かない。
-        ・敬語禁止。
-        ・登場人物・チーム名をすべて個別に#タグ化（ドット・は削除）。
-        ・合計25個以上の大量のハッシュタグを並べろ。
-        
-        文章のみ出力してください。
-        """
+        prompt = f"あなたはプロ野球MLBまとめ動画の管理人です。ニュース：『{title}』 / 『{desc}』。一段目【朗報等】見出し、二段目要約、三段目熱い所感、の構成で。標準語語り口調。全人物#タグ、タグ25個以上。文章のみ出力。"
         response = model.generate_content(prompt)
         return response.text.strip().replace("・", "")
     except Exception as e:
@@ -117,19 +109,16 @@ def generate_caption(title, desc):
 
 def post_reels(video_url, caption):
     base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-    payload = {'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}
-    res = requests.post(base_url, data=payload).json()
+    res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}).json()
     if 'id' not in res: return None
     creation_id = res['id']
-    print(f"⏳ Instagram側の処理を待機中 (ID: {creation_id})...")
-    status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
+    print(f"⏳ Instagram側の処理待ち中 (ID: {creation_id})...")
     for _ in range(40):
         time.sleep(20)
-        status = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+        status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
         if status.get('status_code') == 'FINISHED': break
         elif status.get('status_code') == 'ERROR': return None
-    publish_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
-    return requests.post(publish_url, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+    return requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
@@ -139,6 +128,8 @@ def main():
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
+    
+    # NPB優先スキャン（履歴にあるものは自動で飛ばす）
     video_data = get_npb_video(history)
     
     if not video_data:
@@ -150,23 +141,26 @@ def main():
                 video_data = mlb_item
 
     if video_data:
-        print(f"🚀 ターゲット決定: {video_data['title']}")
+        print(f"🚀 ターゲット決定: {video_data['title']} (ID: {video_data['id']})")
+        
+        # ★連投防止：投稿前に履歴に保存！
+        with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
+        
         processed_file = process_video_v5(video_data['url'])
         public_url = upload_video(processed_file)
         if public_url:
-            print(f"🔗 有効リンク発行: {public_url}")
             caption = generate_caption(video_data['title'], video_data['desc'])
-            if not caption:
-                caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
+            if not caption: caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
             
+            print(f"📝 生成されたキャプション:\n{caption}")
             result = post_reels(public_url, caption)
             if result and 'id' in result:
-                print(f"🏁 投稿成功！")
-                if not is_test_mode:
-                    with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
-                    stats[video_data['type']] += 1
-                    save_stats(stats)
-    else: print("😴 新着なし")
+                print(f"🏁 投稿成功！ ID: {result['id']}")
+                stats[video_data['type']] += 1
+                save_stats(stats)
+            else: print(f"❌ Instagramへの公開に失敗しました。")
+    else:
+        print("😴 投稿可能な新しい動画はありません。")
 
 if __name__ == "__main__":
     main()
