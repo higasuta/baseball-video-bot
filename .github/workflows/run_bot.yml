@@ -24,7 +24,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.11' # 警告が出ないよう最新版にアップ
+
+      - name: Install FFmpeg
+        # 動画編集に必要なソフトをインストールする手順を追加
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: Install dependencies
         run: |
