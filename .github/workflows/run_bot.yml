@@ -11,7 +11,7 @@ on:
         default: 'false'
 
 permissions:
-  contents: write
+  contents: write # 履歴ファイルを保存するために必須
 
 jobs:
   build:
@@ -20,14 +20,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          persist-credentials: true # Git pushを安定させる設定
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # 警告が出ないよう最新版にアップ
+          python-version: '3.11'
 
       - name: Install FFmpeg
-        # 動画編集に必要なソフトをインストールする手順を追加
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
@@ -45,10 +46,11 @@ jobs:
           TEST_MODE: ${{ github.event.inputs.test_mode }}
         run: python main.py
 
-      - name: Commit history and stats
+      - name: Commit and Push changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add history.txt stats.json || true
-          git commit -m "Update history and stats" || true
-          git push
+          git pull origin main # 他の実行と競合しないよう最新を取り込む
+          git add history.txt stats.json
+          git commit -m "Update post history and stats [skip ci]" || exit 0
+          git push origin main
