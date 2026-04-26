@@ -5,7 +5,6 @@ import time
 import subprocess
 import google.generativeai as genai
 import json
-import re
 
 # ==========================================
 # GitHub Secrets から鍵を安全に読み込む
@@ -14,13 +13,10 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_KEY = os.getenv('GEMINI_API_KEY')
 
-# Geminiの設定（変数名を GEMINI_KEY に修正しました）
+# Geminiの設定（お使いの環境で成功した 2.0-flash を使用）
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
-else:
-    print("⚠️ GEMINI_API_KEY が見つかりません。")
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# 判定キーワード
 JPN_MLB_KEYWORDS = ["ohtani", "yamamoto", "imanaga", "darvish", "suzuki", "yoshida", "senga", "matsui", "maeda", "kikuchi"]
 HOT_KEYWORDS = ["home run", "hr", "grand slam", "history", "record", "historic", "milestone", "walk-off"]
 
@@ -35,7 +31,6 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def get_npb_video(history):
-    """【最優先】NPB公式スキャン（連投防止）"""
     sources = ["https://www.youtube.com/@NPB.official/videos", "https://x.com/npb"]
     for src in sources:
         try:
@@ -44,12 +39,11 @@ def get_npb_video(history):
             if len(output) >= 3:
                 video_id = output[1]
                 if video_id not in history:
-                    return {"title": output[0], "desc": "NPB公式最新動画", "url": output[2], "id": video_id, "type": "npb", "is_hot": False}
+                    return {"title": output[0], "desc": "NPB公式動画", "url": output[2], "id": video_id, "type": "npb", "is_hot": False}
         except: continue
     return None
 
 def get_mlb_video(history, is_test_mode):
-    """【二番手】MLB日本人スキャン（連投防止）"""
     dates_to_check = [datetime.datetime.now().strftime('%Y-%m-%d'), (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
     for date_str in dates_to_check:
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
@@ -77,10 +71,8 @@ def process_video_v5(input_url):
     input_file = "input.mp4"
     output_file = "output.mp4"
     subprocess.run(['curl', '-L', input_url, '-o', input_file])
-    # 105%ズーム ＆ 縦長化
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-    cmd = ['ffmpeg', '-i', input_file, '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file]
-    subprocess.run(cmd)
+    subprocess.run(['ffmpeg', '-i', input_file, '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file])
     return output_file
 
 def upload_video(file_path):
@@ -93,34 +85,40 @@ def upload_video(file_path):
     except: return None
 
 def generate_caption(title, desc):
-    """【YouTubeまとめ風・語り口調・ドット排除】"""
+    """【YouTubeまとめ風・完成版】ラベル排除・標準語・大量タグ"""
     if not GEMINI_KEY: return None
     try:
-        # あなたの環境で動作する 2.0-flash を使用
         model = genai.GenerativeModel("gemini-2.0-flash")
         prompt = f"""
-        あなたは野球まとめ動画の管理人です。ニュース：『{title}』 / 『{desc}』
-        
+        あなたはプロ野球・MLB専門のYouTubeまとめ解説動画の管理人です。
+        ニュース：『{title}』 / 『{desc}』
+
         以下の【構成】を守り、標準語の語り口調（〜だ、〜である）で出力せよ。
-        1. 一段目：【朗報】や【驚愕】等から始まる見出し（20-30文字）。ラベル名は不要。
-        2. 二段目：ニュースの核心を2-3行で要約。コピペ厳禁。
-        3. 三段目：データやファンの反応を交えた、熱い所感。
         
-        【ルール】
-        ・敬語禁止。
-        ・登場人物・チーム名をすべて個別に#タグ化。タグ内の「・」は削除して詰めろ（例：#ダルビッシュ有）。
-        ・合計25個以上の大量のハッシュタグを並べろ。
+        【構成】
+        一段目：【朗報】や【悲報】【驚愕】等から始まるインパクト抜群の見出し（20-30文字）。
+        二段目：ニュースの核心を2-3行で簡潔にまとめた解説。
+        三段目：ファンの反応やデータの凄さを交えた熱い所感。
+        
+        【絶対に守るべき掟】
+        ・「見出し：」「概要：」「所感：」といったラベル名は【絶対に】書かないこと。
+        ・敬語（です・ます）は禁止。落ち着いた書き言葉にせよ。
+        ・登場人物・チーム名をすべて個別に#タグ化せよ。タグ内のドット「・」は【絶対に】削除して詰めろ（例：#山本由伸）。
+        ・野球関連タグを含め、合計25個以上の大量のハッシュタグを並べろ。
+        ・最後に元ニュースのタイトルを添える必要はない。
         
         文章のみ出力してください。
         """
         response = model.generate_content(prompt)
+        # 念のためのドット削除
         return response.text.strip().replace("・", "")
-    except: return None
+    except Exception as e:
+        print(f"AIエラー: {e}")
+        return None
 
 def post_reels(video_url, caption):
     base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-    payload = {'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}
-    res = requests.post(base_url, data=payload).json()
+    res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}).json()
     if 'id' not in res: return None
     creation_id = res['id']
     status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
@@ -140,23 +138,14 @@ def main():
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
-    # NPB優先スキャン
-    video_data = get_npb_video(history)
-    
-    if not video_data:
-        mlb_item = get_mlb_video(history, is_test_mode)
-        if mlb_item:
-            total = stats['npb'] + stats['mlb']
-            ratio = stats['mlb'] / total if total > 0 else 0
-            # テストモード or Hotニュース or 比率内なら採用
-            if is_test_mode or mlb_item['is_hot'] or ratio < 0.3:
-                video_data = mlb_item
+    video_data = get_npb_video(history) or get_mlb_video(history, is_test_mode)
 
     if video_data:
         print(f"🚀 ターゲット決定: {video_data['title']}")
         processed_file = process_video_v5(video_data['url'])
         public_url = upload_video(processed_file)
         if public_url:
+            print(f"🔗 Instagram用URL: {public_url}")
             caption = generate_caption(video_data['title'], video_data['desc'])
             if not caption:
                 caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
@@ -167,7 +156,7 @@ def main():
                 with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
                 stats[video_data['type']] += 1
                 save_stats(stats)
-    else: print("😴 新着なし（投稿済みはスキップ）")
+    else: print("😴 新着なし")
 
 if __name__ == "__main__":
     main()
