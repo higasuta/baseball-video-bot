@@ -71,28 +71,40 @@ def get_mlb_video(history, is_test_mode):
         except: continue
     return None
 
-def process_video_v4(input_url):
+def process_video_v5(input_url):
+    """【規格厳格化版】どんな動画も1080x1920、30fps、H.264に変換"""
     input_file = "input.mp4"
     output_file = "output.mp4"
-    print("🎬 動画の加工を開始...")
+    print("🎬 動画のダウンロードと精密加工を開始...")
     subprocess.run(['curl', '-L', input_url, '-o', input_file])
-    # リール用 1080x1920 ズーム加工
-    filter_complex = "scale=1080:-2,scale=iw*1.05:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black"
-    subprocess.run(['ffmpeg', '-i', input_file, '-vf', filter_complex, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-y', output_file])
+    
+    # 複雑な計算を避け、確実に1080x1920の黒枠内にフィットさせるFFmpeg命令
+    # 1. 映像をズームしつつ1080幅にリサイズ
+    # 2. 1080x1920のキャンバスを作成
+    # 3. インスタが好む30fps、ピクセルアスペクト比1:1に固定
+    filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+    
+    cmd = [
+        'ffmpeg', '-i', input_file, 
+        '-vf', filter_complex, 
+        '-r', '30', 
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23',
+        '-c:a', 'aac', '-b:a', '128k', 
+        '-y', output_file
+    ]
+    subprocess.run(cmd)
     return output_file
 
 def upload_video(file_path):
-    """【最新修正】tmpfiles.org を使用して安定した直リンクを取得"""
+    """tmpfiles.org を使用し、強制的に HTTPS URL を作成"""
     print("☁️ 外部サーバー(tmpfiles.org)へアップロード中...")
     try:
         with open(file_path, 'rb') as f:
             res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
             if res.status_code == 200:
                 data = res.json()
-                # Instagramが読み込める直リンク形式に変換
-                # https://tmpfiles.org/xxxx -> https://tmpfiles.org/dl/xxxx
-                url = data['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-                print(f"✅ アップロード成功: {url}")
+                # http を https に置換し、直リンク(/dl/)を作成
+                url = data['data']['url'].replace('http://', 'https://').replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
                 return url
     except Exception as e:
         print(f"❌ アップロード失敗: {e}")
@@ -119,14 +131,14 @@ def post_reels(video_url, caption):
     creation_id = res['id']
     print(f"⏳ Instagram側の処理を待機中 (ID: {creation_id})...")
     status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
-    for _ in range(30):
+    for _ in range(40): # 最大約13分間監視
         time.sleep(20)
         status = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
         print(f"   ステータス: {status.get('status_code')}")
         if status.get('status_code') == 'FINISHED':
             break
         elif status.get('status_code') == 'ERROR':
-            print(f"❌ Instagram内部エラー: {status}")
+            print(f"❌ Instagram内部エラー。動画が要件を満たしていない可能性があります: {status}")
             return None
     
     publish_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
@@ -144,12 +156,12 @@ def main():
 
     if video_data:
         print(f"🚀 ターゲット決定: {video_data['title']}")
-        processed_file = process_video_v4(video_data['url'])
+        processed_file = process_video_v5(video_data['url'])
         
         if os.path.exists(processed_file) and os.path.getsize(processed_file) > 0:
             public_url = upload_video(processed_file)
             if public_url:
-                print(f"🔗 Instagram用URL: {public_url}")
+                print(f"🔗 有効なHTTPSリンクを発行: {public_url}")
                 caption = generate_caption(video_data['title'], video_data['desc'])
                 result = post_reels(public_url, caption)
                 if result and 'id' in result:
@@ -158,8 +170,8 @@ def main():
                         with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
                         stats[video_data['type']] += 1
                         save_stats(stats)
-                else: print(f"❌ 最終公開に失敗しました: {result}")
-            else: print("❌ アップロードに失敗しました。")
+                else: print(f"❌ 最終公開に失敗しました。")
+            else: print("❌ アップロードサーバーが応答しません。")
         else: print("❌ 動画の加工に失敗しました。")
     else: print("😴 新着なし")
 
