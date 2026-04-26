@@ -2,11 +2,14 @@ name: Baseball Video Bot Runner
 
 on:
   schedule:
-    # 15分おきに自動実行
     - cron: '*/15 * * * *'
-  workflow_dispatch: # これで手動実行ボタンが出ます
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: '比率を無視して投稿する場合は true と入力'
+        required: false
+        default: 'false'
 
-# GitHubのリポジトリにファイルを書き戻す（pushする）ための権限設定
 permissions:
   contents: write
 
@@ -21,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
@@ -33,13 +36,13 @@ jobs:
           INSTA_BUSINESS_ID: ${{ secrets.INSTA_BUSINESS_ID }}
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TEST_MODE: ${{ github.event.inputs.test_mode }}
         run: python main.py
 
       - name: Commit history and stats
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # history.txtとstats.jsonが存在する場合のみ追加して保存する
           git add history.txt stats.json || true
           git commit -m "Update history and stats" || true
           git push
