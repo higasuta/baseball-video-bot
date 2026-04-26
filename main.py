@@ -5,7 +5,6 @@ import time
 import subprocess
 import google.generativeai as genai
 import json
-import re
 
 # ==========================================
 # 【設定済み】各種キーとID
@@ -81,51 +80,53 @@ def upload_video(file_path):
         with open(file_path, 'rb') as f:
             res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
             if res.status_code == 200:
-                return res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
+                return res.json()['data']['url'].replace('http://', 'https://').replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
     except: return None
 
 def generate_caption(title, desc):
-    """【こだわり全抽出】YouTubeまとめ動画風キャプション生成"""
+    """【YouTubeまとめ風・3段構成】お使いのキーで確実なモデル名を使用"""
     try:
-        # 最新の 2.0-flash を使用
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        # モデル名を「gemini-flash-latest」に変更しました
+        model = genai.GenerativeModel("gemini-flash-latest")
+        
         prompt = f"""
-        あなたはプロ野球・MLB専門SNS「プレイボール速報」の管理人です。
-        以下のニュースを元に、フォロワーを惹きつけるInstagram投稿を作成してください。
-
-        【ニュース】: {title} / {desc}
-
-        【絶対に守るべきルール】
-        1. 構成：以下の3段構成にすること。
-           ・一段目：【朗報】【悲報】【驚愕】等から始まる、インパクトある20-30文字の見出し。
-           ・二段目：ニュースの核心を2-3行で簡潔にまとめる。
-           ・三段目：専門家・ファンの視点からの熱い所感。
-        2. 文体：標準語の語り口調（〜だ、〜である、〜だろう）を徹底。敬語（ですます）禁止。
-        3. ラベル：項目名（見出し、概要、所感など）は一切出力しない。
-        4. ハッシュタグ：記事内の全人物名、全チーム名を個別にハッシュタグに。タグ内のドット（・）は削除して詰めろ。
-        5. タグ量：野球関連タグ含め、合計28個程度の大量のハッシュタグを並べろ。
+        あなたはプロ野球・MLB専門のYouTubeまとめ解説動画の管理人です。
+        ニュース：『{title}』 / 『{desc}』
+        
+        以下の【構成】を厳守し、標準語の語り口調（〜だ、〜である）で出力せよ。
+        
+        【構成】
+        1. 一段目：【朗報】や【驚愕】等から始まる、20-30文字のインパクトある見出し。
+        2. 二段目：ニュースの核心を2-3行で簡潔にまとめたもの。
+        3. 三段目：専門家・ファンの視点からの熱い所感。
+        
+        【ルール】
+        ・「概要：」「見出し：」などのラベル名は一切書かない。
+        ・敬語は禁止。落ち着いた書き言葉にすること。
+        ・登場人物・チーム名をすべて個別に#タグ化せよ。中黒「・」は絶対に使わず詰めろ（例：#ダルビッシュ有）。
+        ・合計25個以上の大量のハッシュタグを並べろ。
         
         文章のみ出力してください。
         """
         response = model.generate_content(prompt)
         caption = response.text.strip()
-        
-        # 万が一のドット削除（念押し）
-        caption = caption.replace("・", "")
-        return caption
+        # タグ内のドットを念のため一括削除
+        return caption.replace("・", "")
     except Exception as e:
         print(f"AIエラー: {e}")
-        return f"【衝撃】{title}\n\n注目のニュースが入った。今後の活躍から目が離せない。\n#プロ野球 #MLB #野球ファン #野球好きな人と繋がりたい"
+        return None
 
 def post_reels(video_url, caption):
     base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-    res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}).json()
+    payload = {'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}
+    res = requests.post(base_url, data=payload).json()
     if 'id' not in res: return None
     creation_id = res['id']
     status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
-    for _ in range(30):
+    for _ in range(40):
         time.sleep(20)
         status = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+        print(f"   ステータス: {status.get('status_code')}")
         if status.get('status_code') == 'FINISHED': break
         elif status.get('status_code') == 'ERROR': return None
     publish_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
@@ -138,23 +139,19 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    # 1. NPBスキャン
-    video_data = get_npb_video(history, is_test_mode)
-    
-    # 2. なければMLBスキャン
-    if not video_data:
-        mlb_item = get_mlb_video(history, is_test_mode)
-        if mlb_item:
-            total = stats['npb'] + stats['mlb']
-            ratio = stats['mlb'] / total if total > 0 else 0
-            if is_test_mode or mlb_item['is_hot'] or ratio < 0.3:
-                video_data = mlb_item
+    print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
+    video_data = get_npb_video(history, is_test_mode) or get_mlb_video(history, is_test_mode)
 
     if video_data:
+        print(f"🚀 ターゲット決定: {video_data['title']}")
         processed_file = process_video_v5(video_data['url'])
         public_url = upload_video(processed_file)
         if public_url:
             caption = generate_caption(video_data['title'], video_data['desc'])
+            if not caption:
+                print("⚠️ AI執筆失敗のため定型文を使用します。")
+                caption = f"【速報】{video_data['title']}\n\n注目のニュースが入った。今後の活躍に期待したい。\n#プロ野球 #MLB"
+            
             result = post_reels(public_url, caption)
             if result and 'id' in result:
                 print(f"🏁 投稿成功！ ID: {result['id']}")
