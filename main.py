@@ -117,7 +117,56 @@ def post_reels(video_url, caption):
     time.sleep(60) 
     publish_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
     return requests.post(publish_url, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+# ... (中略) ...
 
+def main():
+    # 手動実行(Workflow Dispatch)の時は、比率を無視してテスト投稿する設定にする
+    # 環境変数に TEST_MODE があれば比率を無視
+    is_test_mode = os.getenv('TEST_MODE') == 'true'
+
+    stats = get_stats()
+    history_file = "history.txt"
+    if not os.path.exists(history_file): open(history_file, 'w').close()
+    with open(history_file, 'r') as f: history = f.read().splitlines()
+
+    print(f"⚾️ 探索開始：NPB(YT/X) -> MLB 日本人の順 {'(テストモード)' if is_test_mode else ''}")
+    
+    video_data = get_npb_video(history)
+    
+    if not video_data:
+        mlb_item = get_mlb_video(history)
+        if mlb_item:
+            # テストモード、または Hotニュース、または 比率OK の場合に投稿
+            total = stats['npb'] + stats['mlb']
+            ratio = stats['mlb'] / total if total > 0 else 0
+            
+            if is_test_mode:
+                print("🛠 テストモード：比率を無視してMLBを投稿します。")
+                video_data = mlb_item
+            elif mlb_item['is_hot']:
+                print(f"🔥 MLB大ニュースを優先投稿します。")
+                video_data = mlb_item
+            elif ratio < 0.3:
+                video_data = mlb_item
+            else:
+                print("📊 比率調整：MLB(通常)は30%を超えているため待機。")
+
+    if video_data:
+        # (以下、投稿処理部分はそのまま)
+        print(f"🚀 投稿決定: {video_data['title']}")
+        processed_file = process_video(video_data['url'])
+        public_url = upload_to_catbox(processed_file)
+        caption = generate_caption(video_data['title'], video_data['desc'])
+        result = post_reels(public_url, caption)
+        
+        if result and 'id' in result:
+            print(f"🏁 投稿成功: {result}")
+            with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
+            stats[video_data['type']] += 1
+            save_stats(stats)
+        else: print(f"❌ 投稿失敗: {result}")
+    else:
+        print("😴 投稿可能な新着動画はありません。")
 def main():
     stats = get_stats()
     history_file = "history.txt"
