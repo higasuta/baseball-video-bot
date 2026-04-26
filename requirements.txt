@@ -1,2 +1,2 @@
 requests
-yt-dlp
+google-generativeai
