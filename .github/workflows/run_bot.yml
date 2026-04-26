@@ -2,9 +2,13 @@ name: Baseball Video Bot Runner
 
 on:
   schedule:
-    # 15分おきに実行 (UTC時間なので日本時間とはズレますが15分間隔は維持されます)
+    # 15分おきに自動実行
     - cron: '*/15 * * * *'
-  workflow_dispatch: # 手動で「実行」ボタンを押せるようにする設定
+  workflow_dispatch: # これで手動実行ボタンが出ます
+
+# GitHubのリポジトリにファイルを書き戻す（pushする）ための権限設定
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -26,17 +30,16 @@ jobs:
 
       - name: Run bot script
         env:
-          # ここでGitHubの「隠し金庫(Secrets)」をPythonに渡します
           INSTA_BUSINESS_ID: ${{ secrets.INSTA_BUSINESS_ID }}
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python main.py# ...（上の部分はそのまま）
         run: python main.py
-      
-      - name: Commit history
+
+      - name: Commit history and stats
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add history.txt
-          git commit -m "Update post history" || exit 0
+          # history.txtとstats.jsonが存在する場合のみ追加して保存する
+          git add history.txt stats.json || true
+          git commit -m "Update history and stats" || true
           git push
