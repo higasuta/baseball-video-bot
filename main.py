@@ -76,36 +76,29 @@ def process_video_v4(input_url):
     output_file = "output.mp4"
     print("🎬 動画の加工を開始...")
     subprocess.run(['curl', '-L', input_url, '-o', input_file])
-    # 1080x1920縦長ズーム加工
+    # リール用 1080x1920 ズーム加工
     filter_complex = "scale=1080:-2,scale=iw*1.05:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black"
     subprocess.run(['ffmpeg', '-i', input_file, '-vf', filter_complex, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-y', output_file])
     return output_file
 
 def upload_video(file_path):
-    """複数の無料ストレージを順番に試す、タフなアップロード関数"""
-    print("☁️ 外部サーバーへアップロード中...")
-    
-    # 第1候補: Uguu.se (非常に高速で直リンクが返る)
+    """【最新修正】tmpfiles.org を使用して安定した直リンクを取得"""
+    print("☁️ 外部サーバー(tmpfiles.org)へアップロード中...")
     try:
         with open(file_path, 'rb') as f:
-            res = requests.post('https://uguu.se/api.php?d=upload-tool', files={'file': f})
+            res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
             if res.status_code == 200:
-                print("✅ Uguu.se へのアップロード成功")
-                return res.text.strip()
-    except: pass
-
-    # 第2候補: transfer.sh
-    try:
-        print("⏳ 予備サーバー transfer.sh を試行中...")
-        cmd = f"curl --upload-file {file_path} https://transfer.sh/output.mp4"
-        url = subprocess.check_output(cmd, shell=True).decode().strip()
-        if url: return url
-    except: pass
-
+                data = res.json()
+                # Instagramが読み込める直リンク形式に変換
+                # https://tmpfiles.org/xxxx -> https://tmpfiles.org/dl/xxxx
+                url = data['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
+                print(f"✅ アップロード成功: {url}")
+                return url
+    except Exception as e:
+        print(f"❌ アップロード失敗: {e}")
     return None
 
 def generate_caption(title, desc):
-    # お使いのキーで最高精度の 2.0-flash をメインに、失敗したら 1.5-flash
     for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
         try:
             model = genai.GenerativeModel(model_name)
@@ -117,7 +110,8 @@ def generate_caption(title, desc):
 
 def post_reels(video_url, caption):
     base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-    res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}).json()
+    payload = {'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}
+    res = requests.post(base_url, data=payload).json()
     if 'id' not in res:
         print(f"❌ Instagramへの登録失敗: {res}")
         return None
@@ -132,6 +126,7 @@ def post_reels(video_url, caption):
         if status.get('status_code') == 'FINISHED':
             break
         elif status.get('status_code') == 'ERROR':
+            print(f"❌ Instagram内部エラー: {status}")
             return None
     
     publish_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
@@ -164,7 +159,7 @@ def main():
                         stats[video_data['type']] += 1
                         save_stats(stats)
                 else: print(f"❌ 最終公開に失敗しました: {result}")
-            else: print("❌ アップロードサーバーが応答しません。")
+            else: print("❌ アップロードに失敗しました。")
         else: print("❌ 動画の加工に失敗しました。")
     else: print("😴 新着なし")
 
