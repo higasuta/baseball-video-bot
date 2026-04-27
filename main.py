@@ -17,7 +17,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# 日本人選手フィルター（MLB Japanの中でもさらに厳選するため）
+# 日本人選手フィルター
 JPN_KEYWORDS = ["大谷", "山本", "ダルビッシュ", "鈴木誠也", "吉田正尚", "今永", "松井裕樹", "千賀", "前田健太", "菊池雄星", "ohtani", "yamamoto"]
 
 def get_stats():
@@ -31,27 +31,37 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def fetch_x_video(url_list, history, check_keywords=False):
-    """XのURLリストから最新の動画を1つ見つける共通関数"""
+    """XのURLリストから過去1週間以内の未投稿動画を探す"""
+    # 1週間前の日付（YYYYMMDD形式）
+    week_ago = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime('%Y%m%d')
+    
     for src in url_list:
         user_name = src.split('/')[-1]
-        print(f"🔍 スキャン中 (X): @{user_name}")
+        print(f"🔍 スキャン中 (X): @{user_name} (過去1週間を調査)")
         try:
+            # スキャン範囲を40件に拡大し、日付情報も取得
             cmd = [
                 'yt-dlp', 
-                '--get-id', '--get-title', '--get-url',
-                '--playlist-end', '3',
+                '--get-id', '--get-title', '--get-url', '--print', 'upload_date',
+                '--playlist-end', '40', 
                 '--match-filter', "duration < 240 & !is_live",
                 '--no-check-certificates',
                 src
             ]
             output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().split('\n')
             
-            for i in range(0, len(output)-2, 3):
+            # 4行1組 (Title, ID, URL, Date) で解析
+            for i in range(0, len(output)-3, 4):
                 title = output[i]
                 video_id = output[i+1]
                 video_url = output[i+2]
+                upload_date = output[i+3] # YYYYMMDD
                 
                 if not video_id or video_id in history:
+                    continue
+                
+                # 1週間より古い動画はスキップ
+                if upload_date < week_ago:
                     continue
                 
                 # キーワードチェックが必要な場合（MLB用）
@@ -59,7 +69,7 @@ def fetch_x_video(url_list, history, check_keywords=False):
                     if not any(kw in title.lower() for kw in JPN_KEYWORDS):
                         continue
                 
-                print(f"✅ 発見: {title}")
+                print(f"✅ 発見しました！ ({upload_date}): {title}")
                 return {
                     "title": title, 
                     "url": video_url, 
@@ -71,7 +81,6 @@ def fetch_x_video(url_list, history, check_keywords=False):
     return None
 
 def get_npb_video(history):
-    """NPBメディア系11アカウントを巡回"""
     sources = [
         "https://x.com/PacificleagueTV",
         "https://x.com/sportsnavi_ybB",
@@ -90,14 +99,12 @@ def get_npb_video(history):
     return data
 
 def get_mlb_video(history):
-    """MLB Japan公式アカウントを巡回"""
     sources = ["https://x.com/MLBJapan"]
     data = fetch_x_video(sources, history, check_keywords=True)
     if data: data['type'] = 'mlb'
     return data
 
 def analyze_video_with_ai(video_path, title, source_account):
-    """Gemini 2.0 Flashによる動画解析とキャプション生成"""
     if not os.path.exists(video_path): return 0, None
     print(f"🧠 AIによる動画解析中 (Gemini 2.0 Flash)...")
     try:
@@ -109,10 +116,10 @@ def analyze_video_with_ai(video_path, title, source_account):
         model = genai.GenerativeModel("gemini-2.0-flash")
         prompt = (
             f"この野球動画（タイトル：{title}）を解析してください。\n\n"
-            "1. 最も盛り上がっている場面（例：投球の瞬間、ヒットの瞬間）の開始秒数を「START:秒」で教えてください（不明なら0）。\n"
+            "1. 最も盛り上がっている場面の開始秒数を「START:秒」で教えてください。\n"
             "2. YouTubeの野球2chまとめ解説動画の管理人風に、熱い語り口調でキャプションを作成してください。\n"
             f"3. キャプションの最後に必ず『引用：{source_account}』と記載してください。\n\n"
-            "構成：一段目に見出し、二段目に要約、三段目に熱い所感。人物・チーム名のハッシュタグを25〜29個付与（中黒・は削除）。\n"
+            "構成：一段目に見出し、二段目に要約、三段目に熱い所感。ハッシュタグ25個以上（中黒・は削除）。\n"
             "出力形式：\nSTART:[秒]\nCAPTION:[内容]"
         )
         response = model.generate_content([prompt, video_file])
@@ -129,10 +136,8 @@ def analyze_video_with_ai(video_path, title, source_account):
         return 0, None
 
 def process_video_final(input_file, start_sec):
-    """動画加工：縦型化＋90秒切り抜き"""
     output_file = "output.mp4"
     print(f"✂️ 加工中 (Start: {start_sec}s)...")
-    # 105%ズーム＆縦長化
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
     subprocess.run([
         'ffmpeg', '-ss', str(start_sec), '-i', input_file, 
@@ -150,23 +155,20 @@ def main():
 
     print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
     
-    # 1. まずNPBを探す
+    # 1. NPB探索
     video_data = get_npb_video(history)
     
-    # 2. なければMLBを探す（比率制限あり）
+    # 2. NPBがなければMLB
     if not video_data:
         total = stats['npb'] + stats['mlb']
         ratio = stats['mlb'] / total if total > 0 else 0
         if is_test_mode or ratio < 0.35:
             video_data = get_mlb_video(history)
-        else:
-            print(f"🛑 MLB投稿制限中 (比率: {ratio*100:.1f}%)")
 
     if video_data:
         print(f"🎯 決定: {video_data['title']} (Source: {video_data['source_account']})")
         temp_input = "temp_video.mp4"
         
-        # ダウンロード
         print(f"📥 ダウンロード開始...")
         subprocess.run(['yt-dlp', '-o', temp_input, '--no-check-certificates', video_data['url']])
 
@@ -176,14 +178,12 @@ def main():
 
         with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
 
-        # AI解析・加工
         res = analyze_video_with_ai(temp_input, video_data['title'], video_data['source_account'])
         start_sec, ai_caption = res if res else (0, None)
         if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n\n引用：{video_data['source_account']}\n#プロ野球 #MLB"
         
         processed_file = process_video_final(temp_input, start_sec)
         
-        # 投稿
         print(f"☁️ サーバーアップロード中...")
         try:
             with open(processed_file, 'rb') as f:
@@ -209,7 +209,7 @@ def main():
         except Exception as e:
             print(f"❌ 投稿エラー: {e}")
     else:
-        print("😴 投稿対象なし。")
+        print("😴 過去1週間にも未投稿の動画が見つかりませんでした。")
 
 if __name__ == "__main__":
     main()
