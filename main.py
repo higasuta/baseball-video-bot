@@ -19,7 +19,6 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 JPN_MLB_KEYWORDS = ["ohtani", "yamamoto", "imanaga", "darvish", "suzuki", "yoshida", "senga", "matsui", "maeda", "kikuchi"]
-HOT_KEYWORDS = ["home run", "hr", "grand slam", "history", "record", "historic", "milestone", "walk-off"]
 
 def get_stats():
     if os.path.exists('stats.json'):
@@ -70,26 +69,27 @@ def get_mlb_video(history, is_test_mode):
                     if not video_url: continue
                     is_jpn = any(name in title.lower() or name in desc.lower() for name in JPN_MLB_KEYWORDS)
                     if is_jpn or is_test_mode:
-                        is_hot = any(kw in title.lower() or kw in desc.lower() for kw in HOT_KEYWORDS)
-                        return {"title": title, "desc": desc, "url": video_url, "id": video_id, "type": "mlb", "is_hot": is_hot}
+                        return {"title": title, "desc": desc, "url": video_url, "id": video_id, "type": "mlb", "is_hot": False}
         except: continue
     return None
 
 def analyze_video_with_ai(video_path, title):
-    """Gemini 1.5 Flashに動画を解析させる（モデル名修正版）"""
-    print(f"🧠 AIによる動画解析中 (Gemini 1.5 Flash)...")
+    """Gemini 1.5 Flashに動画を解析させる（最新モデル名に修正）"""
+    if not os.path.exists(video_path):
+        return 0, None
+    print(f"🧠 AIによる動画解析中 (Gemini 1.5 Flash Latest)...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING":
             time.sleep(2)
             video_file = genai.get_file(video_file.name)
 
-        # モデル名を gemini-1.5-flash に修正
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # モデル名を -latest に変更
+        model = genai.GenerativeModel("gemini-1.5-flash-latest")
         prompt = (
             f"この野球動画（タイトル：{title}）を解析してください。\n\n"
             "1. 最も盛り上がっている見どころの開始秒数を「START:秒」で教えてください（不明なら0）。\n"
-            "2. 2ch野球スレまとめ解説動画のナレーター風に、熱いキャプションを作成してください。\n"
+            "2. 2ch野球スレまとめ風のナレーション、熱いキャプションを作成してください。\n"
             "見出し、要約、所感の3段構成。ハッシュタグ25個以上（中黒・は禁止）。\n\n"
             "出力形式：\nSTART:[秒]\nCAPTION:[内容]"
         )
@@ -106,41 +106,29 @@ def analyze_video_with_ai(video_path, title):
         print(f"⚠️ AI解析失敗: {e}")
         return 0, None
 
-def process_video_final(input_file, start_sec):
-    """動画加工：AI指定の開始位置から90秒切り抜き"""
+def process_video_final(input_file, start_sec, title):
+    """動画加工：横型なら縦長化、縦型(Shorts)ならそのままリサイズ"""
+    if not os.path.exists(input_file):
+        return None
     output_file = "output.mp4"
-    print(f"✂️ AI推奨の {start_sec}秒から90秒間を切り抜き加工...")
-    filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+    
+    # 動画がShorts（縦型）かどうかをタイトルや解析で簡易判定
+    is_vertical = "#shorts" in title.lower()
+    
+    print(f"✂️ 加工中 (Vertical: {is_vertical})...")
+    if is_vertical:
+        # 縦型ならリサイズとfps固定のみ
+        filter_complex = "scale=1080:-2,pad=1080:1920:(1080-iw)/2:(1920-ih)/2:color=black,setsar=1"
+    else:
+        # 横型ならいつもの縦型化加工
+        filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+
     subprocess.run([
         'ffmpeg', '-ss', str(start_sec), '-i', input_file, 
         '-t', '90', '-vf', filter_complex, 
         '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file
     ])
     return output_file
-
-def upload_video(file_path):
-    print(f"☁️ クラウドへ一時保存中...")
-    try:
-        with open(file_path, 'rb') as f:
-            res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
-            if res.status_code == 200:
-                url = res.json()['data']['url']
-                return url.replace('http://', 'https://').replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-    except: return None
-
-def post_reels(video_url, caption):
-    print(f"📸 Instagram投稿中...")
-    base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-    res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}).json()
-    if 'id' not in res: return None
-    creation_id = res['id']
-    print(f"⏳ 処理待ち中...")
-    for _ in range(40):
-        time.sleep(20)
-        status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
-        if status.get('status_code') == 'FINISHED': break
-        elif status.get('status_code') == 'ERROR': return None
-    return requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
@@ -157,37 +145,65 @@ def main():
         if mlb_item:
             total = stats['npb'] + stats['mlb']
             ratio = stats['mlb'] / total if total > 0 else 0
-            if is_test_mode or mlb_item['is_hot'] or ratio < 0.35:
+            if is_test_mode or ratio < 0.35:
                 video_data = mlb_item
-            else:
-                print(f"🛑 MLB投稿制限中 (NPB待ち)")
 
     if video_data:
         print(f"🎯 ターゲット確定: {video_data['title']}")
-        # 重複投稿防止ロック
-        with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
-        
-        # ダウンロードは1回だけ行う
         temp_input = "temp_video.mp4"
-        print(f"📥 動画ダウンロード開始...")
-        subprocess.run(['yt-dlp', '-o', temp_input, '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', video_data['url']])
         
+        # YouTubeのブロック回避を強化
+        print(f"📥 ダウンロード開始...")
+        cmd = [
+            'yt-dlp', '-o', temp_input, 
+            '--no-check-certificates',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
+            video_data['url']
+        ]
+        subprocess.run(cmd)
+
+        if not os.path.exists(temp_input):
+            print("❌ ダウンロードに失敗しました。YouTubeのブロックを回避できません。")
+            return
+
+        # 履歴追加（ダウンロード成功時のみ）
+        with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
+
         # AI解析
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'])
         if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
         
-        # 決定した秒数で加工
-        processed_file = process_video_final(temp_input, start_sec)
+        # 加工
+        processed_file = process_video_final(temp_input, start_sec, video_data['title'])
         
         # 投稿
-        public_url = upload_video(processed_file)
-        if public_url:
-            result = post_reels(public_url, ai_caption)
-            if result and 'id' in result:
-                print(f"🏁 投稿成功！")
-                stats[video_data['type']] += 1
-                save_stats(stats)
-            else: print(f"❌ 公開失敗")
+        if processed_file:
+            print(f"☁️ アップロード中...")
+            try:
+                with open(processed_file, 'rb') as f:
+                    res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
+                    if res.status_code == 200:
+                        public_url = res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
+                        
+                        # Instagram投稿
+                        print(f"📸 Instagram投稿中...")
+                        base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
+                        post_res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+                        
+                        if 'id' in post_res:
+                            creation_id = post_res['id']
+                            for _ in range(30):
+                                time.sleep(20)
+                                status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+                                if status.get('status_code') == 'FINISHED':
+                                    requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
+                                    print(f"🏁 投稿完了！")
+                                    stats[video_data['type']] += 1
+                                    save_stats(stats)
+                                    break
+            except Exception as e:
+                print(f"❌ 投稿エラー: {e}")
     else:
         print("😴 投稿対象なし。")
 
