@@ -30,6 +30,16 @@ def get_stats():
 def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
+def check_models():
+    """今使えるGeminiのモデル名を表示する"""
+    print("📋 利用可能なAIモデルを確認中...")
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                print(f"  - {m.name}")
+    except:
+        print("  ⚠️ モデルリストの取得に失敗しました。")
+
 def get_npb_video(history):
     feeds = [
         {"name": "NPB公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC7vYid8pCUpIOn85X_2f_ig"},
@@ -74,33 +84,45 @@ def get_mlb_video(history, is_test_mode):
     return None
 
 def analyze_video_with_ai(video_path, title):
+    """Gemini 1.5 Flashに動画を解析させる（モデル名自動リトライ版）"""
     if not os.path.exists(video_path): return 0, None
-    print(f"🧠 AIによる動画解析中 (Gemini 1.5 Flash Latest)...")
+    print(f"🧠 AIによる動画解析中...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING":
             time.sleep(2)
             video_file = genai.get_file(video_file.name)
 
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
-        prompt = (
-            f"この野球動画（タイトル：{title}）を解析してください。\n\n"
-            "1. 最も盛り上がっている見どころの開始秒数を「START:秒」で教えてください（不明なら0）。\n"
-            "2. 2ch野球スレまとめ風の、熱いキャプションを作成してください。\n"
-            "見出し、要約、所感の3段構成。ハッシュタグ25個以上（中黒・は禁止）。\n\n"
-            "出力形式：\nSTART:[秒]\nCAPTION:[内容]"
-        )
-        response = model.generate_content([prompt, video_file])
-        res_text = response.text
-        genai.delete_file(video_file.name)
+        # 候補となるモデル名を順番に試す
+        for model_name in ["gemini-1.5-flash", "gemini-1.5-flash-latest"]:
+            try:
+                print(f"  👉 モデル {model_name} を試行中...")
+                model = genai.GenerativeModel(model_name)
+                prompt = (
+                    f"この野球動画（タイトル：{title}）を解析してください。\n\n"
+                    "1. 最も盛り上がっている見どころの開始秒数を「START:秒」で教えてください（不明なら0）。\n"
+                    "2. 2ch野球スレまとめ解説動画のナレーター風に、熱いキャプションを作成してください。\n"
+                    "見出し、要約、所感の3段構成。ハッシュタグ25個以上（中黒・は禁止）。\n\n"
+                    "出力形式：\nSTART:[秒]\nCAPTION:[内容]"
+                )
+                response = model.generate_content([prompt, video_file])
+                res_text = response.text
+                
+                # 解析成功ならループ脱出
+                start_match = re.search(r"START:(\d+)", res_text)
+                start_sec = int(start_match.group(1)) if start_match else 0
+                caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
+                caption = caption_match.group(1).strip() if caption_match else None
+                
+                genai.delete_file(video_file.name)
+                return start_sec, caption
+            except Exception as e:
+                if "404" in str(e):
+                    continue # 次のモデル名を試す
+                raise e # 404以外のエラーは致命的なので投げる
 
-        start_match = re.search(r"START:(\d+)", res_text)
-        start_sec = int(start_match.group(1)) if start_match else 0
-        caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
-        caption = caption_match.group(1).strip() if caption_match else None
-        return start_sec, caption
     except Exception as e:
-        print(f"⚠️ AI解析失敗: {e}")
+        print(f"⚠️ AI解析に最終的に失敗しました: {e}")
         return 0, None
 
 def process_video_final(input_file, start_sec, title):
@@ -123,6 +145,8 @@ def process_video_final(input_file, start_sec, title):
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
     stats = get_stats()
+    check_models() # 起動時にモデル一覧を表示
+    
     history_file = "history.txt"
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
@@ -143,23 +167,23 @@ def main():
         temp_input = "temp_video.mp4"
         
         print(f"📥 ダウンロード開始...")
-        # YouTubeのブロックを回避するための「Androidクライアント偽装」オプションを追加
+        # YouTubeのブロック回避（Androidクライアント偽装）
         cmd = [
-            'yt-dlp', 
-            '-o', temp_input,
+            'yt-dlp', '-o', temp_input,
             '--no-check-certificates',
             '--extractor-args', 'youtube:player_client=android',
             '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
             video_data['url']
         ]
-        result = subprocess.run(cmd)
+        subprocess.run(cmd)
 
         if not os.path.exists(temp_input):
-            print("❌ ダウンロードに失敗しました。YouTubeの強力なブロックにより続行不可。")
+            print("❌ ダウンロードに失敗しました。")
             return
 
         with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
 
+        # AI解析
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'])
         if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n#プロ野球 #NPB #MLB"
         
