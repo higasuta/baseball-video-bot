@@ -31,52 +31,59 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def fetch_x_video(url_list, history, check_keywords=False):
-    """XのURLリストから過去1週間以内の未投稿動画を探す"""
-    # 1週間前の日付（YYYYMMDD形式）
+    """XのURLリストから動画を探す（ログ出力を大幅強化）"""
     week_ago = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime('%Y%m%d')
     
     for src in url_list:
         user_name = src.split('/')[-1]
-        print(f"🔍 スキャン中 (X): @{user_name} (過去1週間を調査)")
+        print(f"🔍 スキャン中: @{user_name}")
         try:
-            # スキャン範囲を40件に拡大し、日付情報も取得
+            # yt-dlpの出力を取得。エラーもキャッチできるように stderr=subprocess.STDOUT に変更
             cmd = [
                 'yt-dlp', 
                 '--get-id', '--get-title', '--get-url', '--print', 'upload_date',
                 '--playlist-end', '40', 
                 '--match-filter', "duration < 240 & !is_live",
                 '--no-check-certificates',
+                '--quiet', '--no-warnings',
                 src
             ]
-            output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().split('\n')
+            process = subprocess.run(cmd, capture_output=True, text=True)
+            output = process.stdout.split('\n')
             
-            # 4行1組 (Title, ID, URL, Date) で解析
-            for i in range(0, len(output)-3, 4):
-                title = output[i]
-                video_id = output[i+1]
-                video_url = output[i+2]
-                upload_date = output[i+3] # YYYYMMDD
+            if process.returncode != 0:
+                print(f"  ⚠️ yt-dlpエラー (Code {process.returncode}): {process.stderr[:100]}")
+                continue
+
+            # 有効な行（空行以外）の数を確認
+            lines = [l for l in output if l.strip()]
+            print(f"  👉 {len(lines) // 4}件の動画候補を取得しました")
+
+            for i in range(0, len(lines)-3, 4):
+                title = lines[i]
+                video_id = lines[i+1]
+                video_url = lines[i+2]
+                upload_date = lines[i+3]
                 
-                if not video_id or video_id in history:
+                if not video_id: continue
+
+                # スキップ理由をログに出す
+                if video_id in history:
+                    # ログが埋まるので既読は表示しない
                     continue
                 
-                # 1週間より古い動画はスキップ
                 if upload_date < week_ago:
                     continue
+
+                if check_keywords and not any(kw in title.lower() for kw in JPN_KEYWORDS):
+                    continue
                 
-                # キーワードチェックが必要な場合（MLB用）
-                if check_keywords:
-                    if not any(kw in title.lower() for kw in JPN_KEYWORDS):
-                        continue
-                
-                print(f"✅ 発見しました！ ({upload_date}): {title}")
+                print(f"✅ ターゲット発見！ ({upload_date}): {title}")
                 return {
-                    "title": title, 
-                    "url": video_url, 
-                    "id": video_id,
-                    "source_account": f"@{user_name}"
+                    "title": title, "url": video_url, "id": video_id, "source_account": f"@{user_name}"
                 }
-        except:
+        except Exception as e:
+            print(f"  ❌ 予期せぬエラー: {e}")
             continue
     return None
 
@@ -115,12 +122,11 @@ def analyze_video_with_ai(video_path, title, source_account):
 
         model = genai.GenerativeModel("gemini-2.0-flash")
         prompt = (
-            f"この野球動画（タイトル：{title}）を解析してください。\n\n"
-            "1. 最も盛り上がっている場面の開始秒数を「START:秒」で教えてください。\n"
-            "2. YouTubeの野球2chまとめ解説動画の管理人風に、熱い語り口調でキャプションを作成してください。\n"
-            f"3. キャプションの最後に必ず『引用：{source_account}』と記載してください。\n\n"
-            "構成：一段目に見出し、二段目に要約、三段目に熱い所感。ハッシュタグ25個以上（中黒・は削除）。\n"
-            "出力形式：\nSTART:[秒]\nCAPTION:[内容]"
+            f"この野球動画（タイトル：{title}）を解析し、最高に盛り上がっている「見どころ」を特定してください。\n\n"
+            "1. 見どころの開始秒数を「START:秒」で。不明なら0。\n"
+            "2. 2ch野球スレまとめ風の語り口調で熱いキャプションを作成。\n"
+            f"3. 最後に必ず『引用：{source_account}』と記載。\n\n"
+            "START:[秒]\nCAPTION:[内容]"
         )
         response = model.generate_content([prompt, video_file])
         res_text = response.text
@@ -155,22 +161,21 @@ def main():
 
     print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
     
-    # 1. NPB探索
     video_data = get_npb_video(history)
-    
-    # 2. NPBがなければMLB
     if not video_data:
+        # NPBがなければMLB
         total = stats['npb'] + stats['mlb']
         ratio = stats['mlb'] / total if total > 0 else 0
         if is_test_mode or ratio < 0.35:
             video_data = get_mlb_video(history)
 
     if video_data:
-        print(f"🎯 決定: {video_data['title']} (Source: {video_data['source_account']})")
+        print(f"🎯 決定: {video_data['title']}")
         temp_input = "temp_video.mp4"
         
         print(f"📥 ダウンロード開始...")
-        subprocess.run(['yt-dlp', '-o', temp_input, '--no-check-certificates', video_data['url']])
+        cmd = ['yt-dlp', '-o', temp_input, '--no-check-certificates', video_data['url']]
+        subprocess.run(cmd)
 
         if not os.path.exists(temp_input):
             print("❌ ダウンロード失敗。")
@@ -180,16 +185,16 @@ def main():
 
         res = analyze_video_with_ai(temp_input, video_data['title'], video_data['source_account'])
         start_sec, ai_caption = res if res else (0, None)
-        if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n\n引用：{video_data['source_account']}\n#プロ野球 #MLB"
+        if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n\n引用：{video_data['source_account']}\n#プロ野球"
         
         processed_file = process_video_final(temp_input, start_sec)
         
         print(f"☁️ サーバーアップロード中...")
         try:
             with open(processed_file, 'rb') as f:
-                res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
-                if res.status_code == 200:
-                    public_url = res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
+                up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
+                if up_res.status_code == 200:
+                    public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
                     
                     print(f"📸 Instagram投稿中...")
                     base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
@@ -206,10 +211,12 @@ def main():
                                 stats[video_data['type']] += 1
                                 save_stats(stats)
                                 break
+            else:
+                print(f"❌ クラウドアップロード失敗: {up_res.status_code}")
         except Exception as e:
-            print(f"❌ 投稿エラー: {e}")
+            print(f"❌ 投稿プロセスエラー: {e}")
     else:
-        print("😴 過去1週間にも未投稿の動画が見つかりませんでした。")
+        print("😴 条件に合う未投稿の動画は見つかりませんでした。")
 
 if __name__ == "__main__":
     main()
