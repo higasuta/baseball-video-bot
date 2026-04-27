@@ -30,23 +30,12 @@ def get_stats():
 def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
-def check_models():
-    """今使えるGeminiのモデル名を表示する"""
-    print("📋 利用可能なAIモデルを確認中...")
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                print(f"  - {m.name}")
-    except:
-        print("  ⚠️ モデルリストの取得に失敗しました。")
-
 def get_npb_video(history):
     feeds = [
         {"name": "NPB公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC7vYid8pCUpIOn85X_2f_ig"},
         {"name": "パ・リーグ公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC0v-pxTo1XamIDE-f__Ad0Q"}
     ]
     for feed in feeds:
-        print(f"🔍 NPBスキャン中 (RSS): {feed['name']}")
         try:
             response = requests.get(feed['url'], timeout=10)
             root = ET.fromstring(response.content)
@@ -59,7 +48,6 @@ def get_npb_video(history):
     return None
 
 def get_mlb_video(history, is_test_mode):
-    print(f"🔍 MLB日本人選手スキャン開始...")
     dates = [datetime.datetime.now().strftime('%Y-%m-%d'), (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
     for date_str in dates:
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
@@ -84,7 +72,7 @@ def get_mlb_video(history, is_test_mode):
     return None
 
 def analyze_video_with_ai(video_path, title):
-    """Gemini 1.5 Flashに動画を解析させる（モデル名自動リトライ版）"""
+    """Geminiに動画を解析させる（最新モデルリスト対応版）"""
     if not os.path.exists(video_path): return 0, None
     print(f"🧠 AIによる動画解析中...")
     try:
@@ -93,8 +81,11 @@ def analyze_video_with_ai(video_path, title):
             time.sleep(2)
             video_file = genai.get_file(video_file.name)
 
-        # 候補となるモデル名を順番に試す
-        for model_name in ["gemini-1.5-flash", "gemini-1.5-flash-latest"]:
+        # ログに基づいて利用可能なモデル名を修正
+        candidate_models = ["gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-flash"]
+        
+        res_text = ""
+        for model_name in candidate_models:
             try:
                 print(f"  👉 モデル {model_name} を試行中...")
                 model = genai.GenerativeModel(model_name)
@@ -107,29 +98,30 @@ def analyze_video_with_ai(video_path, title):
                 )
                 response = model.generate_content([prompt, video_file])
                 res_text = response.text
-                
-                # 解析成功ならループ脱出
-                start_match = re.search(r"START:(\d+)", res_text)
-                start_sec = int(start_match.group(1)) if start_match else 0
-                caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
-                caption = caption_match.group(1).strip() if caption_match else None
-                
-                genai.delete_file(video_file.name)
-                return start_sec, caption
-            except Exception as e:
-                if "404" in str(e):
-                    continue # 次のモデル名を試す
-                raise e # 404以外のエラーは致命的なので投げる
+                if res_text: break
+            except:
+                continue
 
+        genai.delete_file(video_file.name)
+
+        if not res_text:
+            return 0, None
+
+        start_match = re.search(r"START:(\d+)", res_text)
+        start_sec = int(start_match.group(1)) if start_match else 0
+        caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
+        caption = caption_match.group(1).strip() if caption_match else None
+        return start_sec, caption
     except Exception as e:
-        print(f"⚠️ AI解析に最終的に失敗しました: {e}")
+        print(f"⚠️ AI解析失敗: {e}")
         return 0, None
 
 def process_video_final(input_file, start_sec, title):
     if not os.path.exists(input_file): return None
     output_file = "output.mp4"
     is_vertical = "#shorts" in title.lower()
-    print(f"✂️ 加工中 (Vertical: {is_vertical})...")
+    print(f"✂️ 加工中 (Start: {start_sec}s / Vertical: {is_vertical})...")
+    
     if is_vertical:
         filter_complex = "scale=1080:-2,pad=1080:1920:(1080-iw)/2:(1920-ih)/2:color=black,setsar=1"
     else:
@@ -145,8 +137,6 @@ def process_video_final(input_file, start_sec, title):
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
     stats = get_stats()
-    check_models() # 起動時にモデル一覧を表示
-    
     history_file = "history.txt"
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
@@ -166,8 +156,8 @@ def main():
         print(f"🎯 ターゲット確定: {video_data['title']}")
         temp_input = "temp_video.mp4"
         
+        # YouTubeダウンロード (Android偽装)
         print(f"📥 ダウンロード開始...")
-        # YouTubeのブロック回避（Androidクライアント偽装）
         cmd = [
             'yt-dlp', '-o', temp_input,
             '--no-check-certificates',
@@ -183,9 +173,12 @@ def main():
 
         with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
 
-        # AI解析
-        start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'])
-        if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n#プロ野球 #NPB #MLB"
+        # AI解析 (ここでのTypeErrorを回避)
+        res = analyze_video_with_ai(temp_input, video_data['title'])
+        start_sec, ai_caption = res if res else (0, None)
+        
+        if not ai_caption: 
+            ai_caption = f"【速報】{video_data['title']}\n#プロ野球 #NPB #MLB"
         
         processed_file = process_video_final(temp_input, start_sec, video_data['title'])
         
