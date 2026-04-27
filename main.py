@@ -74,9 +74,7 @@ def get_mlb_video(history, is_test_mode):
     return None
 
 def analyze_video_with_ai(video_path, title):
-    """Gemini 1.5 Flashに動画を解析させる（最新モデル名に修正）"""
-    if not os.path.exists(video_path):
-        return 0, None
+    if not os.path.exists(video_path): return 0, None
     print(f"🧠 AIによる動画解析中 (Gemini 1.5 Flash Latest)...")
     try:
         video_file = genai.upload_file(path=video_path)
@@ -84,12 +82,11 @@ def analyze_video_with_ai(video_path, title):
             time.sleep(2)
             video_file = genai.get_file(video_file.name)
 
-        # モデル名を -latest に変更
         model = genai.GenerativeModel("gemini-1.5-flash-latest")
         prompt = (
             f"この野球動画（タイトル：{title}）を解析してください。\n\n"
             "1. 最も盛り上がっている見どころの開始秒数を「START:秒」で教えてください（不明なら0）。\n"
-            "2. 2ch野球スレまとめ風のナレーション、熱いキャプションを作成してください。\n"
+            "2. 2ch野球スレまとめ風の、熱いキャプションを作成してください。\n"
             "見出し、要約、所感の3段構成。ハッシュタグ25個以上（中黒・は禁止）。\n\n"
             "出力形式：\nSTART:[秒]\nCAPTION:[内容]"
         )
@@ -107,20 +104,13 @@ def analyze_video_with_ai(video_path, title):
         return 0, None
 
 def process_video_final(input_file, start_sec, title):
-    """動画加工：横型なら縦長化、縦型(Shorts)ならそのままリサイズ"""
-    if not os.path.exists(input_file):
-        return None
+    if not os.path.exists(input_file): return None
     output_file = "output.mp4"
-    
-    # 動画がShorts（縦型）かどうかをタイトルや解析で簡易判定
     is_vertical = "#shorts" in title.lower()
-    
     print(f"✂️ 加工中 (Vertical: {is_vertical})...")
     if is_vertical:
-        # 縦型ならリサイズとfps固定のみ
         filter_complex = "scale=1080:-2,pad=1080:1920:(1080-iw)/2:(1920-ih)/2:color=black,setsar=1"
     else:
-        # 横型ならいつもの縦型化加工
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
 
     subprocess.run([
@@ -152,32 +142,29 @@ def main():
         print(f"🎯 ターゲット確定: {video_data['title']}")
         temp_input = "temp_video.mp4"
         
-        # YouTubeのブロック回避を強化
         print(f"📥 ダウンロード開始...")
+        # YouTubeのブロックを回避するための「Androidクライアント偽装」オプションを追加
         cmd = [
-            'yt-dlp', '-o', temp_input, 
+            'yt-dlp', 
+            '-o', temp_input,
             '--no-check-certificates',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
+            '--extractor-args', 'youtube:player_client=android',
+            '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
             video_data['url']
         ]
-        subprocess.run(cmd)
+        result = subprocess.run(cmd)
 
         if not os.path.exists(temp_input):
-            print("❌ ダウンロードに失敗しました。YouTubeのブロックを回避できません。")
+            print("❌ ダウンロードに失敗しました。YouTubeの強力なブロックにより続行不可。")
             return
 
-        # 履歴追加（ダウンロード成功時のみ）
         with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
 
-        # AI解析
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'])
-        if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
+        if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n#プロ野球 #NPB #MLB"
         
-        # 加工
         processed_file = process_video_final(temp_input, start_sec, video_data['title'])
         
-        # 投稿
         if processed_file:
             print(f"☁️ アップロード中...")
             try:
@@ -186,7 +173,6 @@ def main():
                     if res.status_code == 200:
                         public_url = res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
                         
-                        # Instagram投稿
                         print(f"📸 Instagram投稿中...")
                         base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
                         post_res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
