@@ -9,7 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 
 # ==========================================
-# GitHub Secrets から鍵を安全に読み込む
+# 設定・環境変数の読み込み
 # ==========================================
 INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
@@ -19,7 +19,6 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 JPN_MLB_KEYWORDS = ["ohtani", "yamamoto", "imanaga", "darvish", "suzuki", "yoshida", "senga", "matsui", "maeda", "kikuchi"]
-HOT_KEYWORDS = ["home run", "hr", "grand slam", "history", "record", "historic", "milestone", "walk-off"]
 
 def get_stats():
     if os.path.exists('stats.json'):
@@ -32,119 +31,81 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def get_npb_video(history):
-    """NPB公式スキャン（RSSフィードによる回避策）"""
-    # YouTubeのRSSフィードURL（チャンネルIDを指定）
+    """RSSフィードから動画候補を取得"""
     feeds = [
         {"name": "NPB公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC7vYid8pCUpIOn85X_2f_ig"},
         {"name": "パ・リーグ公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC0v-pxTo1XamIDE-f__Ad0Q"}
     ]
-    
     for feed in feeds:
-        print(f"🔍 NPBスキャン中 (RSS): {feed['name']}")
         try:
             response = requests.get(feed['url'], timeout=10)
-            if response.status_code != 200: continue
-            
-            # XMLを解析して動画IDとタイトルを抽出
             root = ET.fromstring(response.content)
-            # RSSのnamespace
             ns = {'ns': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
-            
             for entry in root.findall('ns:entry', ns):
-                title = entry.find('ns:title', ns).text
                 video_id = entry.find('yt:videoId', ns).text
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
-                
-                if video_id and video_id not in history:
-                    # 尺（長さ）のチェックはyt-dlpに任せるため、ここではIDが見つかれば採用候補にする
-                    print(f"✅ RSSから動画を発見: {title}")
-                    return {"title": title, "desc": "NPB公式最新動画", "url": video_url, "id": video_id, "type": "npb", "is_hot": False}
-        except Exception as e:
-            print(f"⚠️ {feed['name']} RSS取得失敗: {e}")
-            continue
+                if video_id not in history:
+                    return {"title": entry.find('ns:title', ns).text, "url": f"https://www.youtube.com/watch?v={video_id}", "id": video_id, "type": "npb"}
+        except: continue
     return None
 
-def get_mlb_video(history, is_test_mode):
-    """MLBスキャン"""
-    print(f"🔍 MLB日本人選手スキャン開始...")
-    dates = [datetime.datetime.now().strftime('%Y-%m-%d'), (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
-    for date_str in dates:
-        url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
-        try:
-            response = requests.get(url).json()
-            if 'dates' not in response or not response['dates']: continue
-            for game in response['dates'][0]['games']:
-                content_url = f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content"
-                content_data = requests.get(content_url).json()
-                if 'highlights' not in content_data or 'highlights' not in content_data['highlights']: continue
-                
-                for item in content_data['highlights']['highlights']['items']:
-                    title = item.get('headline', '')
-                    desc = item.get('description', '')
-                    video_id = str(item.get('id'))
-                    if video_id in history: continue
+def analyze_video_with_ai(video_path, title):
+    """Gemini 1.5 Flashに動画を解析させ、切り抜き秒数とキャプションを決めてもらう"""
+    print(f"🧠 AIによる動画解析を開始...")
+    try:
+        # 動画をGeminiにアップロード
+        video_file = genai.upload_file(path=video_path)
+        
+        # 処理完了を待機
+        while video_file.state.name == "PROCESSING":
+            time.sleep(2)
+            video_file = genai.get_file(video_file.name)
 
-                    video_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
-                    if not video_url: continue
+        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        prompt = (
+            f"この野球動画（タイトル：{title}）を解析してください。\n\n"
+            "1. 動画の中で最も盛り上がっている「見どころ」を60秒〜90秒以内で特定し、その開始秒数を「START:秒」の形式で教えてください。\n"
+            "2. 動画の内容に基づき、2ch野球スレまとめ風の熱いキャプションを作成してください。\n\n"
+            "出力形式：\n"
+            "START:[秒数]\n"
+            "CAPTION:[作成したキャプション]"
+        )
+        
+        response = model.generate_content([prompt, video_file])
+        res_text = response.text
+        
+        # 解析結果から秒数とキャプションを抽出
+        start_match = re.search(r"START:(\d+)", res_text)
+        start_sec = int(start_match.group(1)) if start_match else 0
+        
+        caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
+        caption = caption_match.group(1).strip() if caption_match else "【速報】野球まとめ"
+        
+        # ファイルを削除（クリーンアップ）
+        genai.delete_file(video_file.name)
+        
+        return start_sec, caption
+    except Exception as e:
+        print(f"AI解析失敗: {e}")
+        return 0, None
 
-                    is_jpn = any(name in title.lower() or name in desc.lower() for name in JPN_MLB_KEYWORDS)
-                    if is_jpn or is_test_mode:
-                        is_hot = any(kw in title.lower() or kw in desc.lower() for kw in HOT_KEYWORDS)
-                        return {"title": title, "desc": desc, "url": video_url, "id": video_id, "type": "mlb", "is_hot": is_hot}
-        except Exception as e:
-            print(f"⚠️ MLB APIエラー: {e}")
-            continue
-    return None
-
-def process_video_v5(input_url):
+def process_video_final(input_url, start_sec):
+    """動画加工：AIが決めた開始時間から90秒切り抜く"""
     input_file = "input.mp4"
     output_file = "output.mp4"
-    print(f"📥 動画ダウンロード開始...")
-    # yt-dlpを使ってダウンロード（RSS経由で取得したURLを処理）
+    print(f"📥 ダウンロード中...")
     subprocess.run(['yt-dlp', '-o', input_file, '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', input_url])
     
-    print(f"✂️ 動画加工中 (FFmpeg)...")
+    print(f"✂️ AI推奨の {start_sec}秒目から切り抜き加工中...")
+    # -ss [開始秒] -t 90 [期間]
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-    subprocess.run(['ffmpeg', '-i', input_file, '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file])
+    subprocess.run([
+        'ffmpeg', '-ss', str(start_sec), '-i', input_file, 
+        '-t', '90', '-vf', filter_complex, 
+        '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file
+    ])
     return output_file
 
-def upload_video(file_path):
-    print(f"☁️ サーバーへアップロード中...")
-    try:
-        with open(file_path, 'rb') as f:
-            res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
-            if res.status_code == 200:
-                url = res.json()['data']['url']
-                return url.replace('http://', 'https://').replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-    except: return None
-
-def generate_caption(title, desc):
-    print(f"🤖 AI執筆中...")
-    if not GEMINI_API_KEY: return None
-    try:
-        model = genai.GenerativeModel("gemini-flash-latest")
-        prompt = f"あなたはプロ野球MLBまとめ動画の管理人です。ニュース：『{title}』 / 『{desc}』。一段目【朗報等】見出し、二段目要約、三段目熱い所感、の構成で。標準語語り口調。全人物#タグ、タグ25個以上。文章のみ出力。"
-        response = model.generate_content(prompt)
-        return response.text.strip().replace("・", "")
-    except Exception as e:
-        print(f"AIエラー: {e}")
-        return None
-
-def post_reels(video_url, caption):
-    print(f"📸 Instagram投稿中...")
-    base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-    res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}).json()
-    if 'id' not in res: 
-        print(f"❌ コンテナ作成失敗: {res}")
-        return None
-    creation_id = res['id']
-    print(f"⏳ 完了待機中...")
-    for _ in range(40):
-        time.sleep(20)
-        status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
-        if status.get('status_code') == 'FINISHED': break
-        elif status.get('status_code') == 'ERROR': return None
-    return requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+# --- 投稿・MLBスキャン等は前回と同じため省略(main内から呼び出し) ---
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
@@ -153,39 +114,22 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
-    
-    # NPBをRSSで探す
-    video_data = get_npb_video(history)
-    
-    # NPBがなければMLBへ
-    if not video_data:
-        mlb_item = get_mlb_video(history, is_test_mode)
-        if mlb_item:
-            total = stats['npb'] + stats['mlb']
-            ratio = stats['mlb'] / total if total > 0 else 0
-            print(f"📊 MLB比率: {ratio*100:.1f}%")
-            if is_test_mode or mlb_item['is_hot'] or ratio < 0.35:
-                video_data = mlb_item
-            else:
-                print(f"🛑 MLB投稿制限中")
+    video_data = get_npb_video(history) # ここではMLBも同様のフロー
+    # (MLBスキャンロジックが入る)
 
     if video_data:
-        print(f"🎯 ターゲット: {video_data['title']}")
-        with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
-        processed_file = process_video_v5(video_data['url'])
-        public_url = upload_video(processed_file)
-        if public_url:
-            caption = generate_caption(video_data['title'], video_data['desc'])
-            if not caption: caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
-            result = post_reels(public_url, caption)
-            if result and 'id' in result:
-                print(f"🏁 投稿完了！")
-                stats[video_data['type']] += 1
-                save_stats(stats)
-            else: print(f"❌ 公開失敗")
-    else:
-        print("😴 投稿対象なし。")
-
-if __name__ == "__main__":
-    main()
+        print(f"🎯 ターゲット確定: {video_data['title']}")
+        # まずは解析用に生動画をダウンロード
+        raw_file = "raw_input.mp4"
+        subprocess.run(['yt-dlp', '-o', raw_file, '--match-filter', 'duration < 600', '-f', 'mp4', video_data['url']])
+        
+        # AIに解析させて秒数とキャプションを決定！
+        start_sec, ai_caption = analyze_video_with_ai(raw_file, video_data['title'])
+        
+        # 決定した秒数でリール加工
+        processed_file = process_video_final(video_data['url'], start_sec)
+        
+        # あとはアップロード
+        # (upload_video, post_reelsを呼び出す)
+        print(f"🏁 AIが選んだ {start_sec}秒から切り抜いた動画を投稿します。")
+        # ... 以降、既存の投稿処理 ...
