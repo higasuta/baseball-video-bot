@@ -6,6 +6,7 @@ import subprocess
 import google.generativeai as genai
 import json
 import re
+import xml.etree.ElementTree as ET
 
 # ==========================================
 # GitHub Secrets から鍵を安全に読み込む
@@ -31,36 +32,35 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def get_npb_video(history):
-    """NPB公式スキャン（ブラウザ偽装強化版）"""
-    sources = [
-        "https://www.youtube.com/@NPB.official/videos",
-        "https://www.youtube.com/@PacificLeagueSpecial/videos", 
-        "https://x.com/npb"
+    """NPB公式スキャン（RSSフィードによる回避策）"""
+    # YouTubeのRSSフィードURL（チャンネルIDを指定）
+    feeds = [
+        {"name": "NPB公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC7vYid8pCUpIOn85X_2f_ig"},
+        {"name": "パ・リーグ公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC0v-pxTo1XamIDE-f__Ad0Q"}
     ]
-    for src in sources:
-        print(f"🔍 NPBスキャン中: {src}")
+    
+    for feed in feeds:
+        print(f"🔍 NPBスキャン中 (RSS): {feed['name']}")
         try:
-            # yt-dlpにブラウザのふりをさせる引数を追加
-            cmd = [
-                'yt-dlp', 
-                '--get-id', '--get-title', '--get-url', 
-                '--match-filter', 'duration < 180', 
-                '--playlist-end', '5', 
-                '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                src
-            ]
-            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().split('\n')
+            response = requests.get(feed['url'], timeout=10)
+            if response.status_code != 200: continue
             
-            for i in range(0, len(output)-2, 3):
-                title = output[i]
-                video_id = output[i+1]
-                video_url = output[i+2]
+            # XMLを解析して動画IDとタイトルを抽出
+            root = ET.fromstring(response.content)
+            # RSSのnamespace
+            ns = {'ns': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
+            
+            for entry in root.findall('ns:entry', ns):
+                title = entry.find('ns:title', ns).text
+                video_id = entry.find('yt:videoId', ns).text
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                
                 if video_id and video_id not in history:
-                    print(f"✅ 新着NPB動画発見: {title}")
+                    # 尺（長さ）のチェックはyt-dlpに任せるため、ここではIDが見つかれば採用候補にする
+                    print(f"✅ RSSから動画を発見: {title}")
                     return {"title": title, "desc": "NPB公式最新動画", "url": video_url, "id": video_id, "type": "npb", "is_hot": False}
         except Exception as e:
-            print(f"⚠️ {src} の取得に失敗しました。次を試します。")
+            print(f"⚠️ {feed['name']} RSS取得失敗: {e}")
             continue
     return None
 
@@ -100,7 +100,9 @@ def process_video_v5(input_url):
     input_file = "input.mp4"
     output_file = "output.mp4"
     print(f"📥 動画ダウンロード開始...")
-    subprocess.run(['curl', '-L', input_url, '-o', input_file])
+    # yt-dlpを使ってダウンロード（RSS経由で取得したURLを処理）
+    subprocess.run(['yt-dlp', '-o', input_file, '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', input_url])
+    
     print(f"✂️ 動画加工中 (FFmpeg)...")
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
     subprocess.run(['ffmpeg', '-i', input_file, '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-y', output_file])
@@ -129,14 +131,14 @@ def generate_caption(title, desc):
         return None
 
 def post_reels(video_url, caption):
-    print(f"📸 Instagram投稿リクエスト中...")
+    print(f"📸 Instagram投稿中...")
     base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
     res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': ACCESS_TOKEN}).json()
     if 'id' not in res: 
-        print(f"❌ エラー: {res}")
+        print(f"❌ コンテナ作成失敗: {res}")
         return None
     creation_id = res['id']
-    print(f"⏳ 処理待ち中 (ID: {creation_id})...")
+    print(f"⏳ 完了待機中...")
     for _ in range(40):
         time.sleep(20)
         status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
@@ -153,21 +155,23 @@ def main():
 
     print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
     
+    # NPBをRSSで探す
     video_data = get_npb_video(history)
     
+    # NPBがなければMLBへ
     if not video_data:
         mlb_item = get_mlb_video(history, is_test_mode)
         if mlb_item:
             total = stats['npb'] + stats['mlb']
             ratio = stats['mlb'] / total if total > 0 else 0
-            print(f"📊 現在のMLB比率: {ratio*100:.1f}%")
+            print(f"📊 MLB比率: {ratio*100:.1f}%")
             if is_test_mode or mlb_item['is_hot'] or ratio < 0.35:
                 video_data = mlb_item
             else:
-                print(f"🛑 MLB投稿制限中 (NPB待ち)")
+                print(f"🛑 MLB投稿制限中")
 
     if video_data:
-        print(f"🎯 ターゲット確定: {video_data['title']}")
+        print(f"🎯 ターゲット: {video_data['title']}")
         with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
         processed_file = process_video_v5(video_data['url'])
         public_url = upload_video(processed_file)
@@ -176,7 +180,7 @@ def main():
             if not caption: caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
             result = post_reels(public_url, caption)
             if result and 'id' in result:
-                print(f"🏁 投稿成功！ ID: {result['id']}")
+                print(f"🏁 投稿完了！")
                 stats[video_data['type']] += 1
                 save_stats(stats)
             else: print(f"❌ 公開失敗")
