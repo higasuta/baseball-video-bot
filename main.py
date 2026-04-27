@@ -31,14 +31,13 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def fetch_x_video(url_list, history, check_keywords=False):
-    """XのURLリストから動画を探す（ログ出力を大幅強化）"""
+    """XのURLリストから動画を探す"""
     week_ago = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime('%Y%m%d')
     
     for src in url_list:
         user_name = src.split('/')[-1]
         print(f"🔍 スキャン中: @{user_name}")
         try:
-            # yt-dlpの出力を取得。エラーもキャッチできるように stderr=subprocess.STDOUT に変更
             cmd = [
                 'yt-dlp', 
                 '--get-id', '--get-title', '--get-url', '--print', 'upload_date',
@@ -52,10 +51,9 @@ def fetch_x_video(url_list, history, check_keywords=False):
             output = process.stdout.split('\n')
             
             if process.returncode != 0:
-                print(f"  ⚠️ yt-dlpエラー (Code {process.returncode}): {process.stderr[:100]}")
+                print(f"  ⚠️ yt-dlpエラー: {process.stderr[:100]}")
                 continue
 
-            # 有効な行（空行以外）の数を確認
             lines = [l for l in output if l.strip()]
             print(f"  👉 {len(lines) // 4}件の動画候補を取得しました")
 
@@ -65,11 +63,7 @@ def fetch_x_video(url_list, history, check_keywords=False):
                 video_url = lines[i+2]
                 upload_date = lines[i+3]
                 
-                if not video_id: continue
-
-                # スキップ理由をログに出す
-                if video_id in history:
-                    # ログが埋まるので既読は表示しない
+                if not video_id or video_id in history:
                     continue
                 
                 if upload_date < week_ago:
@@ -83,7 +77,7 @@ def fetch_x_video(url_list, history, check_keywords=False):
                     "title": title, "url": video_url, "id": video_id, "source_account": f"@{user_name}"
                 }
         except Exception as e:
-            print(f"  ❌ 予期せぬエラー: {e}")
+            print(f"  ❌ エラー: {e}")
             continue
     return None
 
@@ -113,24 +107,33 @@ def get_mlb_video(history):
 
 def analyze_video_with_ai(video_path, title, source_account):
     if not os.path.exists(video_path): return 0, None
-    print(f"🧠 AIによる動画解析中 (Gemini 2.0 Flash)...")
+    print(f"🧠 AIによる動画解析中...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING":
             time.sleep(2)
             video_file = genai.get_file(video_file.name)
 
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        prompt = (
-            f"この野球動画（タイトル：{title}）を解析し、最高に盛り上がっている「見どころ」を特定してください。\n\n"
-            "1. 見どころの開始秒数を「START:秒」で。不明なら0。\n"
-            "2. 2ch野球スレまとめ風の語り口調で熱いキャプションを作成。\n"
-            f"3. 最後に必ず『引用：{source_account}』と記載。\n\n"
-            "START:[秒]\nCAPTION:[内容]"
-        )
-        response = model.generate_content([prompt, video_file])
-        res_text = response.text
+        candidate_models = ["gemini-2.0-flash", "gemini-flash-latest"]
+        res_text = ""
+        for model_name in candidate_models:
+            try:
+                print(f"  👉 モデル {model_name} を試行中...")
+                model = genai.GenerativeModel(model_name)
+                prompt = (
+                    f"この野球動画（タイトル：{title}）を解析してください。\n\n"
+                    "1. 最も盛り上がっている場面の開始秒数を「START:秒」で教えてください。\n"
+                    "2. 2ch野球スレまとめ風の語り口調で熱いキャプションを作成してください。\n"
+                    f"3. 最後に必ず『引用：{source_account}』と記載してください。\n\n"
+                    "START:[秒]\nCAPTION:[内容]"
+                )
+                response = model.generate_content([prompt, video_file])
+                res_text = response.text
+                if res_text: break
+            except: continue
+
         genai.delete_file(video_file.name)
+        if not res_text: return 0, None
 
         start_match = re.search(r"START:(\d+)", res_text)
         start_sec = int(start_match.group(1)) if start_match else 0
@@ -163,7 +166,6 @@ def main():
     
     video_data = get_npb_video(history)
     if not video_data:
-        # NPBがなければMLB
         total = stats['npb'] + stats['mlb']
         ratio = stats['mlb'] / total if total > 0 else 0
         if is_test_mode or ratio < 0.35:
@@ -174,8 +176,7 @@ def main():
         temp_input = "temp_video.mp4"
         
         print(f"📥 ダウンロード開始...")
-        cmd = ['yt-dlp', '-o', temp_input, '--no-check-certificates', video_data['url']]
-        subprocess.run(cmd)
+        subprocess.run(['yt-dlp', '-o', temp_input, '--no-check-certificates', video_data['url']])
 
         if not os.path.exists(temp_input):
             print("❌ ダウンロード失敗。")
@@ -198,23 +199,27 @@ def main():
                     
                     print(f"📸 Instagram投稿中...")
                     base_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-                    post_res = requests.post(base_url, data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+                    post_data = {'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}
+                    post_res = requests.post(base_url, data=post_data).json()
                     
                     if 'id' in post_res:
                         creation_id = post_res['id']
                         for _ in range(30):
                             time.sleep(20)
-                            status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+                            status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
+                            status = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
                             if status.get('status_code') == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 print(f"🏁 投稿完了！")
                                 stats[video_data['type']] += 1
                                 save_stats(stats)
                                 break
-            else:
-                print(f"❌ クラウドアップロード失敗: {up_res.status_code}")
+                    else:
+                        print(f"❌ Instagram投稿失敗: {post_res}")
+                else:
+                    print(f"❌ クラウドアップロード失敗: {up_res.status_code}")
         except Exception as e:
-            print(f"❌ 投稿プロセスエラー: {e}")
+            print(f"❌ プロセスエラー: {e}")
     else:
         print("😴 条件に合う未投稿の動画は見つかりませんでした。")
 
