@@ -32,7 +32,6 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def get_npb_video(history):
-    """RSSフィードから新着動画を取得"""
     feeds = [
         {"name": "NPB公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC7vYid8pCUpIOn85X_2f_ig"},
         {"name": "パ・リーグ公式", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC0v-pxTo1XamIDE-f__Ad0Q"}
@@ -51,7 +50,6 @@ def get_npb_video(history):
     return None
 
 def get_mlb_video(history, is_test_mode):
-    """MLB日本人ハイライトをAPIから取得"""
     print(f"🔍 MLB日本人選手スキャン開始...")
     dates = [datetime.datetime.now().strftime('%Y-%m-%d'), (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
     for date_str in dates:
@@ -78,7 +76,7 @@ def get_mlb_video(history, is_test_mode):
     return None
 
 def analyze_video_with_ai(video_path, title):
-    """Gemini 1.5 Flashに動画を解析させ、切り抜き開始位置とキャプションを決定"""
+    """Gemini 1.5 Flashに動画を解析させる（モデル名修正版）"""
     print(f"🧠 AIによる動画解析中 (Gemini 1.5 Flash)...")
     try:
         video_file = genai.upload_file(path=video_path)
@@ -86,7 +84,8 @@ def analyze_video_with_ai(video_path, title):
             time.sleep(2)
             video_file = genai.get_file(video_file.name)
 
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        # モデル名を gemini-1.5-flash に修正
+        model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = (
             f"この野球動画（タイトル：{title}）を解析してください。\n\n"
             "1. 最も盛り上がっている見どころの開始秒数を「START:秒」で教えてください（不明なら0）。\n"
@@ -107,13 +106,9 @@ def analyze_video_with_ai(video_path, title):
         print(f"⚠️ AI解析失敗: {e}")
         return 0, None
 
-def process_video_v6(input_url, start_sec):
-    """動画加工：AI指定の開始位置から90秒切り抜き＆縦長化"""
-    input_file = "input.mp4"
+def process_video_final(input_file, start_sec):
+    """動画加工：AI指定の開始位置から90秒切り抜き"""
     output_file = "output.mp4"
-    print(f"📥 動画ダウンロード中...")
-    subprocess.run(['yt-dlp', '-o', input_file, '-f', 'mp4', input_url])
-    
     print(f"✂️ AI推奨の {start_sec}秒から90秒間を切り抜き加工...")
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
     subprocess.run([
@@ -169,20 +164,23 @@ def main():
 
     if video_data:
         print(f"🎯 ターゲット確定: {video_data['title']}")
+        # 重複投稿防止ロック
         with open(history_file, 'a') as f: f.write(video_data['id'] + "\n")
         
-        # まず解析用に生ファイルをダウンロード
-        raw_file = "raw_input.mp4"
-        subprocess.run(['yt-dlp', '-o', raw_file, '-f', 'mp4', video_data['url']])
+        # ダウンロードは1回だけ行う
+        temp_input = "temp_video.mp4"
+        print(f"📥 動画ダウンロード開始...")
+        subprocess.run(['yt-dlp', '-o', temp_input, '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', video_data['url']])
         
         # AI解析
-        start_sec, ai_caption = analyze_video_with_ai(raw_file, video_data['title'])
+        start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'])
         if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n#プロ野球 #MLB"
         
-        # 加工
-        processed_file = process_video_v6(video_data['url'], start_sec)
-        public_url = upload_video(processed_file)
+        # 決定した秒数で加工
+        processed_file = process_video_final(temp_input, start_sec)
         
+        # 投稿
+        public_url = upload_video(processed_file)
         if public_url:
             result = post_reels(public_url, ai_caption)
             if result and 'id' in result:
