@@ -76,41 +76,31 @@ def analyze_video_with_ai(video_path, title, source_account):
     if not os.path.exists(video_path): return 0, None
     print(f"🧠 AIによる動画解析中...")
     try:
-        # 動画の長さを取得
         probe = subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path])
         total_duration = float(probe)
-        
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
-
         model = genai.GenerativeModel("gemini-2.0-flash")
         prompt = (f"この野球動画（タイトル：{title}）を解析してください。\n"
                   "1. 最高潮の場面の開始秒数を「START:秒」で。\n"
-                  "2. 野球2chまとめ解説動画風の熱いキャプションを作成。\n"
+                  "2. 野球2chまとめ風の熱いキャプションを作成。\n"
                   f"3. 最後に『引用：{source_account}』と記載。\n"
                   "START:[秒]\nCAPTION:[内容]")
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
-        
         start_match = re.search(r"START:(\d+)", res_text)
         start_sec = int(start_match.group(1)) if start_match else 0
-        
-        # ★短すぎ防止ガード: 残り時間が5秒を切るなら最初から使う
-        if total_duration - start_sec < 5:
-            print(f"  ⚠️ AI指定の開始位置では動画が短すぎるため、0秒から開始します。")
-            start_sec = 0
-
+        if total_duration - start_sec < 5: start_sec = 0
         caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
         caption = caption_match.group(1).strip() if caption_match else None
-        print(f"  ✨ AI解析成功: 開始 {start_sec}秒 / 全長 {total_duration:.1f}秒")
+        print(f"  ✨ AI解析成功: 開始 {start_sec}秒")
         return start_sec, caption
     except: return 0, None
 
 def process_video_final(input_file, start_sec):
     output_file = "output.mp4"
     print(f"✂️ 加工中 (Start: {start_sec}s)...")
-    # 修正: movflags +faststart を追加し、Instagramの読み込みを高速化
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
     subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', input_file, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-movflags', '+faststart', '-y', output_file])
     return output_file
@@ -127,8 +117,7 @@ def main():
     if not video_data:
         total = stats['npb'] + stats['mlb']
         ratio = stats['mlb'] / total if total > 0 else 0
-        if is_test_mode or ratio < 0.35:
-            video_data = get_mlb_video(history, is_test_mode)
+        if is_test_mode or ratio < 0.35: video_data = get_mlb_video(history, is_test_mode)
 
     if video_data:
         print(f"🎯 ターゲット: {video_data['title']}")
@@ -149,35 +138,26 @@ def main():
                 up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
                 if up_res.status_code == 200:
                     public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-                    print(f"📸 Instagramへ動画を送信中...")
+                    print(f"📸 Instagram送信開始...")
+                    # 投稿コンテナ作成
                     post_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
-                    post_res = requests.post(post_url, data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+                    params = {'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}
+                    post_res = requests.post(post_url, data=params).json()
                     
                     if 'id' in post_res:
                         creation_id = post_res['id']
-                        print(f"⏳ Instagram側の処理を待機 (ID: {creation_id})...")
+                        print(f"⏳ 処理待機 (ID: {creation_id})...")
                         for i in range(30):
                             time.sleep(30)
-                            status_url = f"https://graph.facebook.com/v21.0/{creation_id}?fields=status_code,error_message&access_token={ACCESS_TOKEN}"
-                            status_res = requests.get(status_url).json()
-                            status = status_res.get('status_code')
-                            print(f"  [{i+1}/30] ステータス: {status}")
+                            # ステータス確認のURL形式をより確実に修正
+                            status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
+                            status_params = {'fields': 'status_code', 'access_token': ACCESS_TOKEN}
+                            status_res = requests.get(status_url, params=status_params).json()
                             
+                            # 全レスポンスを必ず表示（デバッグ用）
+                            print(f"  [{i+1}/30] API Response: {status_res}")
+                            
+                            status = status_res.get('status_code')
                             if status == 'FINISHED':
-                                print(f"🚀 公開リクエスト...")
-                                pub_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
-                                if 'id' in pub_res:
-                                    print(f"🏁 投稿完了！ ID: {pub_res['id']}")
-                                    stats[video_data['type']] += 1
-                                    save_stats(stats)
-                                else: print(f"❌ 公開失敗: {pub_res}")
-                                return
-                            elif status == 'ERROR':
-                                print(f"❌ Instagramエラー詳細: {status_res.get('error_message', '不明なエラー')}")
-                                return
-                    else: print(f"❌ コンテナ作成失敗: {post_res}")
-        except Exception as e: print(f"❌ システムエラー: {e}")
-    else: print("😴 投稿対象なし。")
-
-if __name__ == "__main__":
-    main()
+                                print(f"🚀 公開実行...")
+                                pub_url = f
