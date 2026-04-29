@@ -44,6 +44,7 @@ def get_npb_video(history):
             for i in range(0, len(lines)-3, 4):
                 title, video_id, video_url, upload_date = lines[i], lines[i+1], lines[i+2], lines[i+3]
                 if video_id not in history and upload_date >= week_ago:
+                    print(f"✅ NPB動画発見: {title}")
                     return {"title": title, "url": video_url, "id": video_id, "type": "npb", "source_account": f"@{user_name}"}
         except: continue
     return None
@@ -68,6 +69,7 @@ def get_mlb_video(history, is_test_mode):
                     is_jpn = any(kw in title.lower() for kw in JPN_KEYWORDS)
                     is_boring = any(kw in title.lower() for kw in BLACK_KEYWORDS)
                     if (is_jpn and not is_boring) or (is_test_mode and not is_boring):
+                        print(f"✅ MLB動画発見: {title}")
                         return {"title": title, "url": video_url, "id": video_id, "type": "mlb", "source_account": "@MLBJapan"}
         except: continue
     return None
@@ -83,7 +85,7 @@ def analyze_video_with_ai(video_path, title, source_account):
         model = genai.GenerativeModel("gemini-2.0-flash")
         prompt = (f"この野球動画（タイトル：{title}）を解析してください。\n"
                   "1. 最高潮の場面の開始秒数を「START:秒」で。\n"
-                  "2. 野球2chまとめ風の熱いキャプションを作成。\n"
+                  "2. 野球2chまとめ解説動画風の熱いキャプションを作成。\n"
                   f"3. 最後に『引用：{source_account}』と記載。\n"
                   "START:[秒]\nCAPTION:[内容]")
         response = model.generate_content([prompt, video_file])
@@ -139,7 +141,6 @@ def main():
                 if up_res.status_code == 200:
                     public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
                     print(f"📸 Instagram送信開始...")
-                    # 投稿コンテナ作成
                     post_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
                     params = {'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}
                     post_res = requests.post(post_url, data=params).json()
@@ -149,15 +150,30 @@ def main():
                         print(f"⏳ 処理待機 (ID: {creation_id})...")
                         for i in range(30):
                             time.sleep(30)
-                            # ステータス確認のURL形式をより確実に修正
                             status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
                             status_params = {'fields': 'status_code', 'access_token': ACCESS_TOKEN}
                             status_res = requests.get(status_url, params=status_params).json()
-                            
-                            # 全レスポンスを必ず表示（デバッグ用）
                             print(f"  [{i+1}/30] API Response: {status_res}")
                             
                             status = status_res.get('status_code')
                             if status == 'FINISHED':
                                 print(f"🚀 公開実行...")
-                                pub_url = f
+                                publish_endpoint = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
+                                publish_res = requests.post(publish_endpoint, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+                                if 'id' in publish_res:
+                                    print(f"🏁 投稿完了！ 投稿ID: {publish_res['id']}")
+                                    stats[video_data['type']] += 1
+                                    save_stats(stats)
+                                else:
+                                    print(f"❌ 公開失敗: {publish_res}")
+                                return
+                            elif status == 'ERROR':
+                                print(f"❌ Instagram内部エラー")
+                                return
+                    else:
+                        print(f"❌ コンテナ作成失敗: {post_res}")
+        except Exception as e: print(f"❌ システムエラー: {e}")
+    else: print("😴 投稿対象なし。")
+
+if __name__ == "__main__":
+    main()
