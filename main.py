@@ -17,9 +17,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# 日本人選手フィルター
 JPN_KEYWORDS = ["大谷", "山本", "ダルビッシュ", "鈴木誠也", "吉田正尚", "今永", "松井裕樹", "千賀", "前田健太", "菊池雄星", "ohtani", "yamamoto", "imanaga"]
-# 除外キーワード
 BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update"]
 
 def get_stats():
@@ -48,7 +46,7 @@ def get_npb_video(history):
             cmd = [
                 'yt-dlp', '--get-id', '--get-title', '--get-url', '--print', 'upload_date',
                 '--playlist-end', '10', '--match-filter', "duration < 240 & !is_live",
-                '--no-check-certificates', '--user-agent', 'Mozilla/5.0', '--quiet', src
+                '--no-check-certificates', '--quiet', src
             ]
             process = subprocess.run(cmd, capture_output=True, text=True)
             if process.returncode != 0: continue
@@ -78,10 +76,8 @@ def get_mlb_video(history, is_test_mode):
                     if video_id in history: continue
                     video_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                     if not video_url: continue
-                    
                     is_jpn = any(kw in title.lower() for kw in JPN_KEYWORDS)
                     is_boring = any(kw in title.lower() for kw in BLACK_KEYWORDS)
-                    
                     if (is_jpn and not is_boring) or (is_test_mode and not is_boring):
                         print(f"✅ MLB動画発見: {title}")
                         return {"title": title, "url": video_url, "id": video_id, "type": "mlb", "source_account": "@MLBJapan"}
@@ -104,13 +100,12 @@ def analyze_video_with_ai(video_path, title, source_account):
                 model = genai.GenerativeModel(model_name)
                 prompt = (f"この野球動画（タイトル：{title}）を解析してください。\n"
                           "1. 最高潮の場面の開始秒数を「START:秒」で。\n"
-                          "2. 野球2chまとめ風の熱いキャプションを作成。\n"
-                          f"3. 最後に必ず『引用：{source_account}』と記載。\n"
+                          "2. 野球2chまとめ解説動画風の熱いキャプションを作成。\n"
+                          f"3. 最後に『引用：{source_account}』と記載。\n"
                           "START:[秒]\nCAPTION:[内容]")
                 response = model.generate_content([prompt, video_file])
                 res_text = response.text
                 genai.delete_file(video_file.name)
-                
                 start_match = re.search(r"START:(\d+)", res_text)
                 start_sec = int(start_match.group(1)) if start_match else 0
                 caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
@@ -168,21 +163,25 @@ def main():
                 up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
                 if up_res.status_code == 200:
                     public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-                    print(f"📸 Instagramコンテナ作成開始...")
+                    print(f"📸 Instagramコンテナ作成...")
                     post_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
                     post_res = requests.post(post_url, data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                     
                     if 'id' in post_res:
                         creation_id = post_res['id']
                         print(f"⏳ Instagram側の処理を待機中 (ID: {creation_id})...")
-                        for i in range(40):
-                            time.sleep(20)
-                            status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,error', 'access_token': ACCESS_TOKEN}).json()
-                            status = status_res.get('status_code')
-                            print(f"  [{i+1}/40] 現在のステータス: {status}")
+                        for i in range(30):
+                            time.sleep(30)
+                            # status_code だけでなく、APIが返す全ての情報を取得してログに出す
+                            status_url = f"https://graph.facebook.com/v21.0/{creation_id}?fields=status_code,error&access_token={ACCESS_TOKEN}"
+                            status_res = requests.get(status_url).json()
                             
+                            # デバッグログ：Instagramからの生の応答を表示
+                            print(f"  [{i+1}/30] Raw Response: {status_res}")
+                            
+                            status = status_res.get('status_code')
                             if status == 'FINISHED':
-                                print(f"🚀 公開リクエスト送信...")
+                                print(f"🚀 公開中...")
                                 publish_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
                                 if 'id' in publish_res:
                                     print(f"🏁 投稿完了！ 投稿ID: {publish_res['id']}")
@@ -190,15 +189,13 @@ def main():
                                     save_stats(stats)
                                 else:
                                     print(f"❌ 公開失敗: {publish_res}")
-                                break
+                                return # 完了
                             elif status == 'ERROR':
-                                print(f"❌ Instagram側で動画処理エラー: {status_res.get('error')}")
-                                break
+                                print(f"❌ 動画処理エラー: {status_res.get('error')}")
+                                return
                     else:
                         print(f"❌ コンテナ作成失敗: {post_res}")
-                else:
-                    print(f"❌ クラウドアップロード失敗: {up_res.status_code}")
-        except Exception as e: print(f"❌ システムエラー: {e}")
+        except Exception as e: print(f"❌ エラー: {e}")
     else: print("😴 投稿対象なし。")
 
 if __name__ == "__main__":
