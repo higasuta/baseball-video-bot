@@ -32,15 +32,10 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def get_npb_candidates(history):
-    """YouTube RSSから動画候補を複数取得する"""
-    feeds = [
-        {"name": "パ・リーグTV", "id": "UC0v-pxTo1XamIDE-f__Ad0Q"},
-        {"name": "NPB公式", "id": "UC7vYid8pCUpIOn85X_2f_ig"}
-    ]
+    feeds = [{"name": "パ・リーグTV", "id": "UC0v-pxTo1XamIDE-f__Ad0Q"}, {"name": "NPB公式", "id": "UC7vYid8pCUpIOn85X_2f_ig"}]
     candidates = []
     for feed in feeds:
         url = f"https://www.youtube.com/feeds/videos.xml?channel_id={feed['id']}"
-        print(f"🔍 YouTube RSSスキャン中: {feed['name']}")
         try:
             res = requests.get(url, timeout=20)
             root = ET.fromstring(res.content)
@@ -54,7 +49,6 @@ def get_npb_candidates(history):
     return candidates
 
 def get_mlb_candidates(history, is_test_mode):
-    """MLB APIから動画候補を取得"""
     print(f"🔍 MLB APIスキャン中...")
     candidates = []
     for day_offset in range(2):
@@ -78,22 +72,23 @@ def get_mlb_candidates(history, is_test_mode):
     return candidates
 
 def download_video(url, output_path, is_youtube):
-    """動画をダウンロード。YouTubeの場合は強力な回避策を使用"""
+    """動画ダウンロード（YouTube向けの多重回避策）"""
     if is_youtube:
-        # YouTubeのブロックを回避するための最新の戦略（web_creatorクライアント）
-        cmd = [
-            'yt-dlp', '-o', output_path,
-            '--extractor-args', 'youtube:player_client=web_creator,android',
-            '--no-check-certificates', url
-        ]
-    else:
-        cmd = ['curl', '-L', url, '-o', output_path]
-    
-    try:
-        subprocess.run(cmd, timeout=120)
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
-    except:
+        clients = ['web_creator', 'ios', 'android', 'mweb']
+        for client in clients:
+            print(f"  👉 YouTubeクライアント試行: {client}")
+            cmd = ['yt-dlp', '-o', output_path, '--extractor-args', f'youtube:player_client={client}', '--no-check-certificates', '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1', url]
+            try:
+                res = subprocess.run(cmd, timeout=90)
+                if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                    return True
+            except: continue
         return False
+    else:
+        try:
+            subprocess.run(['curl', '-L', url, '-o', output_path], timeout=60)
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
+        except: return False
 
 def analyze_video_with_ai(video_path, title, source_account):
     print(f"🧠 AIによる動画解析中 (Gemini)...")
@@ -107,82 +102,69 @@ def analyze_video_with_ai(video_path, title, source_account):
         genai.delete_file(video_file.name)
         start_match = re.search(r"START:(\d+)", res_text); start_sec = int(start_match.group(1)) if start_match else 0
         caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL); caption = caption_match.group(1).strip() if caption_match else None
+        print(f"  ✨ 解析成功: {start_sec}s")
         return start_sec, caption
     except: return 0, None
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
-    stats = get_stats()
-    history_file = "history.txt"
+    stats = get_stats(); history_file = "history.txt"
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
-    
-    # NPBとMLBの候補をすべて集める
     candidates = get_npb_candidates(history)
     total = stats['npb'] + stats['mlb']
     ratio = stats['mlb'] / total if total > 0 else 0
-    if is_test_mode or ratio < 0.40:
-        candidates += get_mlb_candidates(history, is_test_mode)
+    if is_test_mode or ratio < 0.40: candidates += get_mlb_candidates(history, is_test_mode)
 
-    if not candidates:
-        print("😴 全ソースにおいて新しい動画が見つかりませんでした。"); return
+    if not candidates: print("😴 新着なし"); return
 
-    # ダウンロードに成功するまで候補を試す
-    target = None
-    temp_input = "temp_video.mp4"
+    target = None; temp_input = "temp_video.mp4"
     for candidate in candidates:
-        print(f"📥 試行中: {candidate['title']}")
+        print(f"📥 ターゲット試行: {candidate['title']}")
         if download_video(candidate['url'], temp_input, candidate['type'] == 'npb'):
-            target = candidate
-            break
-        print(f"  ❌ ダウンロード失敗、次の候補へ...")
+            target = candidate; break
+    
+    if not target: print("❌ 全候補ダウンロード失敗"); return
 
-    if not target:
-        print("❌ 候補はありましたが、全てのダウンロードに失敗しました。"); return
-
-    # AI解析 & FFmpeg加工
     start_sec, ai_caption = analyze_video_with_ai(temp_input, target['title'], target['source'])
-    if not ai_caption: ai_caption = f"【朗報】最高のプレー！\n\n引用：{target['source']}\n#野球 #プロ野球"
+    if not ai_caption: ai_caption = f"【朗報】今日の好プレー！\n\n引用：{target['source']}\n#プロ野球 #野球"
     
     output_file = "output.mp4"
+    # 画質を上げ（2.5M）、Instagramの拒絶を防ぐ
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-    subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '18', '-movflags', '+faststart', '-y', output_file])
+    subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '2500k', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', output_file])
 
-    # Instagram投稿
     try:
         with open(output_file, 'rb') as f:
             up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
             if up_res.status_code == 200:
                 public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-                print(f"📥 クラウド保存完了。検証のため20秒待機...")
-                time.sleep(20)
+                print(f"📥 クラウド保存完了。URLの安定性を確認中...")
+                # URLが有効になるまで最大10回確認
+                for _ in range(10):
+                    if requests.head(public_url).status_code == 200: break
+                    time.sleep(5)
 
-                # 検証：Instagramがアクセスする前に、自らURLが生きているか確認
-                check = requests.head(public_url)
-                if check.status_code != 200:
-                    print("❌ クラウド上のファイルが読み取れません。中断します。"); return
-
-                print(f"📸 Instagram送信開始...")
+                print(f"📸 Instagramへ送信開始...")
                 post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                 
                 if 'id' in post_res:
                     creation_id = post_res['id']
                     for i in range(30):
                         time.sleep(30)
-                        status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+                        status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,failure_reason', 'access_token': ACCESS_TOKEN}).json()
                         status = status_res.get('status_code')
                         print(f"  [{i+1}/30] ステータス: {status}")
                         if status == 'FINISHED':
-                            print(f"🚀 公開実行...")
-                            requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
-                            print(f"🏁 投稿完了！")
-                            with open(history_file, 'a') as fh: fh.write(target['id'] + "\n")
-                            stats[target['type']] += 1
-                            save_stats(stats); return
+                            publish_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+                            if 'id' in publish_res:
+                                print(f"🏁 投稿成功！ ID: {publish_res['id']}")
+                                with open(history_file, 'a') as fh: fh.write(target['id'] + "\n")
+                                stats[target['type']] += 1; save_stats(stats); return
                         elif status == 'ERROR':
-                            print(f"❌ 処理失敗: {status_res}"); return
+                            print(f"❌ Instagramエラー理由: {status_res.get('failure_reason')}"); return
                 else: print(f"❌ コンテナ作成失敗: {post_res}")
     except Exception as e: print(f"❌ エラー: {e}")
 
