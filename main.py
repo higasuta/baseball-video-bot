@@ -31,12 +31,13 @@ def get_stats():
 def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
-def get_npb_video(history):
-    """YouTube RSSフィードからNPB動画を取得（ブロックされない確実な方法）"""
+def get_npb_candidates(history):
+    """YouTube RSSから動画候補を複数取得する"""
     feeds = [
-        {"name": "NPB公式", "id": "UC7vYid8pCUpIOn85X_2f_ig"},
-        {"name": "パ・リーグTV", "id": "UC0v-pxTo1XamIDE-f__Ad0Q"}
+        {"name": "パ・リーグTV", "id": "UC0v-pxTo1XamIDE-f__Ad0Q"},
+        {"name": "NPB公式", "id": "UC7vYid8pCUpIOn85X_2f_ig"}
     ]
+    candidates = []
     for feed in feeds:
         url = f"https://www.youtube.com/feeds/videos.xml?channel_id={feed['id']}"
         print(f"🔍 YouTube RSSスキャン中: {feed['name']}")
@@ -45,17 +46,17 @@ def get_npb_video(history):
             root = ET.fromstring(res.content)
             ns = {'ns': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
             for entry in root.findall('ns:entry', ns):
-                video_id = entry.find('yt:videoId', ns).text
+                v_id = entry.find('yt:videoId', ns).text
                 title = entry.find('ns:title', ns).text
-                if video_id not in history:
-                    print(f"✅ 新着動画を発見: {title}")
-                    return {"title": title, "url": f"https://www.youtube.com/watch?v={video_id}", "id": video_id, "type": "npb", "source_account": f"YouTube {feed['name']}"}
+                if v_id not in history:
+                    candidates.append({"title": title, "url": f"https://www.youtube.com/watch?v={v_id}", "id": v_id, "type": "npb", "source": f"YouTube {feed['name']}"})
         except: continue
-    return None
+    return candidates
 
-def get_mlb_video(history, is_test_mode):
-    """MLB APIから日本人動画を取得"""
+def get_mlb_candidates(history, is_test_mode):
+    """MLB APIから動画候補を取得"""
     print(f"🔍 MLB APIスキャン中...")
+    candidates = []
     for day_offset in range(2):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
@@ -67,15 +68,32 @@ def get_mlb_video(history, is_test_mode):
                     items = content.get('highlights', {}).get('highlights', {}).get('items', [])
                     for item in items:
                         title = item.get('headline', '')
-                        video_id = str(item.get('id'))
-                        if video_id in history: continue
+                        v_id = str(item.get('id'))
                         video_url = next((p['url'] for p in item.get('playbacks', []) if p['name'] == 'mp4Avc'), None)
-                        if video_url and (any(kw in title.lower() for kw in JPN_KEYWORDS) or is_test_mode):
-                            if not any(kw in title.lower() for kw in BLACK_KEYWORDS):
-                                print(f"✅ MLB動画を発見: {title}")
-                                return {"title": title, "url": video_url, "id": video_id, "type": "mlb", "source_account": "@MLBJapan"}
+                        if v_id not in history and video_url:
+                            if any(kw in title.lower() for kw in JPN_KEYWORDS) or is_test_mode:
+                                if not any(kw in title.lower() for kw in BLACK_KEYWORDS):
+                                    candidates.append({"title": title, "url": video_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
         except: continue
-    return None
+    return candidates
+
+def download_video(url, output_path, is_youtube):
+    """動画をダウンロード。YouTubeの場合は強力な回避策を使用"""
+    if is_youtube:
+        # YouTubeのブロックを回避するための最新の戦略（web_creatorクライアント）
+        cmd = [
+            'yt-dlp', '-o', output_path,
+            '--extractor-args', 'youtube:player_client=web_creator,android',
+            '--no-check-certificates', url
+        ]
+    else:
+        cmd = ['curl', '-L', url, '-o', output_path]
+    
+    try:
+        subprocess.run(cmd, timeout=120)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
+    except:
+        return False
 
 def analyze_video_with_ai(video_path, title, source_account):
     print(f"🧠 AIによる動画解析中 (Gemini)...")
@@ -89,11 +107,8 @@ def analyze_video_with_ai(video_path, title, source_account):
         genai.delete_file(video_file.name)
         start_match = re.search(r"START:(\d+)", res_text); start_sec = int(start_match.group(1)) if start_match else 0
         caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL); caption = caption_match.group(1).strip() if caption_match else None
-        print(f"  ✨ 解析成功: {start_sec}s")
         return start_sec, caption
-    except Exception as e:
-        print(f"  ⚠️ AI解析失敗: {e}")
-        return 0, None
+    except: return 0, None
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
@@ -103,60 +118,73 @@ def main():
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     print(f"⚾️ 探索開始 {'(テストモード)' if is_test_mode else ''}")
-    video_data = get_npb_video(history)
-    if not video_data:
-        video_data = get_mlb_video(history, is_test_mode)
+    
+    # NPBとMLBの候補をすべて集める
+    candidates = get_npb_candidates(history)
+    total = stats['npb'] + stats['mlb']
+    ratio = stats['mlb'] / total if total > 0 else 0
+    if is_test_mode or ratio < 0.40:
+        candidates += get_mlb_candidates(history, is_test_mode)
 
-    if video_data:
-        temp_input = "temp_video.mp4"
-        print(f"📥 ダウンロード開始: {video_data['url']}")
-        if video_data['type'] == 'npb':
-            # YouTubeダウンロード（Android偽装）
-            subprocess.run(['yt-dlp', '-o', temp_input, '--extractor-args', 'youtube:player_client=android', video_data['url']])
-        else:
-            subprocess.run(['curl', '-L', video_data['url'], '-o', temp_input])
-        
-        if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 1000:
-            print("❌ ダウンロード失敗。"); return
+    if not candidates:
+        print("😴 全ソースにおいて新しい動画が見つかりませんでした。"); return
 
-        start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source_account'])
-        if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n\n引用：{video_data['source_account']}\n#プロ野球"
-        
-        output_file = "output.mp4"
-        # 画質を上げ(crf 18)、Instagramが拒絶しない設定を徹底
-        filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '18', '-movflags', '+faststart', '-y', output_file])
-        
-        try:
-            with open(output_file, 'rb') as f:
-                up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
-                if up_res.status_code == 200:
-                    public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-                    print(f"📥 クラウド保存完了。準備のため15秒待機...")
-                    time.sleep(15)
+    # ダウンロードに成功するまで候補を試す
+    target = None
+    temp_input = "temp_video.mp4"
+    for candidate in candidates:
+        print(f"📥 試行中: {candidate['title']}")
+        if download_video(candidate['url'], temp_input, candidate['type'] == 'npb'):
+            target = candidate
+            break
+        print(f"  ❌ ダウンロード失敗、次の候補へ...")
 
-                    print(f"📸 Instagram送信開始...")
-                    post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
-                    
-                    if 'id' in post_res:
-                        creation_id = post_res['id']
-                        for i in range(30):
-                            time.sleep(30)
-                            status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
-                            status = status_res.get('status_code')
-                            print(f"  [{i+1}/30] ステータス: {status}")
-                            if status == 'FINISHED':
-                                pub_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
-                                if 'id' in pub_res:
-                                    print(f"🏁 投稿完了！ ID: {pub_res['id']}")
-                                    with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
-                                    stats[video_data['type']] += 1
-                                    save_stats(stats); return
-                            elif status == 'ERROR':
-                                print(f"❌ 処理失敗: {status_res}"); return
-                    else: print(f"❌ コンテナ作成失敗: {post_res}")
-        except Exception as e: print(f"❌ エラー: {e}")
-    else: print("😴 投稿対象なし。")
+    if not target:
+        print("❌ 候補はありましたが、全てのダウンロードに失敗しました。"); return
+
+    # AI解析 & FFmpeg加工
+    start_sec, ai_caption = analyze_video_with_ai(temp_input, target['title'], target['source'])
+    if not ai_caption: ai_caption = f"【朗報】最高のプレー！\n\n引用：{target['source']}\n#野球 #プロ野球"
+    
+    output_file = "output.mp4"
+    filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+    subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '18', '-movflags', '+faststart', '-y', output_file])
+
+    # Instagram投稿
+    try:
+        with open(output_file, 'rb') as f:
+            up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
+            if up_res.status_code == 200:
+                public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
+                print(f"📥 クラウド保存完了。検証のため20秒待機...")
+                time.sleep(20)
+
+                # 検証：Instagramがアクセスする前に、自らURLが生きているか確認
+                check = requests.head(public_url)
+                if check.status_code != 200:
+                    print("❌ クラウド上のファイルが読み取れません。中断します。"); return
+
+                print(f"📸 Instagram送信開始...")
+                post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+                
+                if 'id' in post_res:
+                    creation_id = post_res['id']
+                    for i in range(30):
+                        time.sleep(30)
+                        status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+                        status = status_res.get('status_code')
+                        print(f"  [{i+1}/30] ステータス: {status}")
+                        if status == 'FINISHED':
+                            print(f"🚀 公開実行...")
+                            requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
+                            print(f"🏁 投稿完了！")
+                            with open(history_file, 'a') as fh: fh.write(target['id'] + "\n")
+                            stats[target['type']] += 1
+                            save_stats(stats); return
+                        elif status == 'ERROR':
+                            print(f"❌ 処理失敗: {status_res}"); return
+                else: print(f"❌ コンテナ作成失敗: {post_res}")
+    except Exception as e: print(f"❌ エラー: {e}")
 
 if __name__ == "__main__":
     main()
