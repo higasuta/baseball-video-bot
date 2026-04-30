@@ -44,7 +44,6 @@ def get_npb_video(history):
             for i in range(0, len(lines)-3, 4):
                 title, video_id, video_url, upload_date = lines[i], lines[i+1], lines[i+2], lines[i+3]
                 if video_id not in history and upload_date >= week_ago:
-                    print(f"✅ NPB動画発見: {title}")
                     return {"title": title, "url": video_url, "id": video_id, "type": "npb", "source_account": f"@{user_name}"}
         except: continue
     return None
@@ -57,7 +56,7 @@ def get_mlb_video(history, is_test_mode):
         try:
             res = requests.get(url).json()
             if 'dates' not in res or not res['dates']: continue
-            for game in res['dates'][0]['games']:
+            for game in response['dates'][0]['games']:
                 content = requests.get(f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content").json()
                 if 'highlights' not in content or 'highlights' not in content['highlights']: continue
                 for item in content['highlights']['highlights']['items']:
@@ -69,7 +68,6 @@ def get_mlb_video(history, is_test_mode):
                     is_jpn = any(kw in title.lower() for kw in JPN_KEYWORDS)
                     is_boring = any(kw in title.lower() for kw in BLACK_KEYWORDS)
                     if (is_jpn and not is_boring) or (is_test_mode and not is_boring):
-                        print(f"✅ MLB動画発見: {title}")
                         return {"title": title, "url": video_url, "id": video_id, "type": "mlb", "source_account": "@MLBJapan"}
         except: continue
     return None
@@ -98,12 +96,15 @@ def analyze_video_with_ai(video_path, title, source_account):
         caption = caption_match.group(1).strip() if caption_match else None
         print(f"  ✨ AI解析成功: 開始 {start_sec}秒")
         return start_sec, caption
-    except: return 0, None
+    except Exception as e:
+        print(f"  ⚠️ AI解析スキップ: {e}")
+        return 0, None
 
 def process_video_final(input_file, start_sec):
     output_file = "output.mp4"
     print(f"✂️ 加工中 (Start: {start_sec}s)...")
     filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+    # movflags faststart で再生情報を先頭に配置し、Instagramの処理エラーを回避
     subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', input_file, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23', '-movflags', '+faststart', '-y', output_file])
     return output_file
 
@@ -119,7 +120,8 @@ def main():
     if not video_data:
         total = stats['npb'] + stats['mlb']
         ratio = stats['mlb'] / total if total > 0 else 0
-        if is_test_mode or ratio < 0.35: video_data = get_mlb_video(history, is_test_mode)
+        if is_test_mode or ratio < 0.35:
+            video_data = get_mlb_video(history, is_test_mode)
 
     if video_data:
         print(f"🎯 ターゲット: {video_data['title']}")
@@ -150,28 +152,27 @@ def main():
                         print(f"⏳ 処理待機 (ID: {creation_id})...")
                         for i in range(30):
                             time.sleep(30)
-                            status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
-                            status_params = {'fields': 'status_code', 'access_token': ACCESS_TOKEN}
-                            status_res = requests.get(status_url, params=status_params).json()
-                            print(f"  [{i+1}/30] API Response: {status_res}")
-                            
+                            # 正しいエラー詳細フィールド failure_reason を追加
+                            status_url = f"https://graph.facebook.com/v21.0/{creation_id}?fields=status_code,failure_reason&access_token={ACCESS_TOKEN}"
+                            status_res = requests.get(status_url).json()
                             status = status_res.get('status_code')
+                            print(f"  [{i+1}/30] Status: {status}")
+                            
                             if status == 'FINISHED':
                                 print(f"🚀 公開実行...")
-                                publish_endpoint = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish"
-                                publish_res = requests.post(publish_endpoint, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
-                                if 'id' in publish_res:
-                                    print(f"🏁 投稿完了！ 投稿ID: {publish_res['id']}")
+                                pub_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+                                if 'id' in pub_res:
+                                    print(f"🏁 投稿完了！ 投稿ID: {pub_res['id']}")
                                     stats[video_data['type']] += 1
                                     save_stats(stats)
-                                else:
-                                    print(f"❌ 公開失敗: {publish_res}")
+                                else: print(f"❌ 公開失敗: {pub_res}")
                                 return
                             elif status == 'ERROR':
-                                print(f"❌ Instagram内部エラー")
+                                # Instagramが教えてくれる「不採用の理由」を表示
+                                reason = status_res.get('failure_reason', '原因不明')
+                                print(f"❌ Instagram処理エラー: {reason}")
                                 return
-                    else:
-                        print(f"❌ コンテナ作成失敗: {post_res}")
+                    else: print(f"❌ コンテナ作成失敗: {post_res}")
         except Exception as e: print(f"❌ システムエラー: {e}")
     else: print("😴 投稿対象なし。")
 
