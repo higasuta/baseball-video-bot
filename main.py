@@ -37,7 +37,7 @@ def get_npb_video(history):
         user_name = src.split('/')[-1]
         print(f"🔍 スキャン中: @{user_name}")
         try:
-            cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--print', 'upload_date', '--playlist-end', '10', '--no-check-certificates', '--quiet', src]
+            cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--print', 'upload_date', '--playlist-end', '10', '--match-filter', "duration < 240 & !is_live", '--no-check-certificates', '--quiet', src]
             process = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if process.returncode != 0: continue
             lines = [l for l in process.stdout.split('\n') if l.strip()]
@@ -75,16 +75,16 @@ def get_mlb_video(history, is_test_mode):
 
 def analyze_video_with_ai(video_path, title, source_account):
     if not os.path.exists(video_path): return 0, None
-    print(f"🧠 AIによる動画解析中 (Gemini 1.5 Flash)...")
+    print(f"🧠 AI解析中 (Gemini)...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         
-        # 制限が緩い 1.5 Flash を優先
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = (f"野球動画（タイトル：{title}）を解析してください。\n"
+        # あなたの環境で動作する正しいモデル名を使用
+        model = genai.GenerativeModel("gemini-flash-latest")
+        prompt = (f"野球動画（タイトル：{title}）を解析せよ。\n"
                   "1. 最高潮の場面の開始秒数を「START:秒」で。\n"
-                  "2. 野球2chまとめ解説動画風の熱いキャプションを作成。\n"
+                  "2. 野球2chまとめ解説動画風の熱いキャプションを作成せよ。\n"
                   f"3. 最後に『引用：{source_account}』と記載。\n"
                   "START:[秒]\nCAPTION:[内容]")
         response = model.generate_content([prompt, video_file])
@@ -92,10 +92,10 @@ def analyze_video_with_ai(video_path, title, source_account):
         genai.delete_file(video_file.name)
         start_match = re.search(r"START:(\d+)", res_text); start_sec = int(start_match.group(1)) if start_match else 0
         caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL); caption = caption_match.group(1).strip() if caption_match else None
-        print(f"  ✨ 解析成功: {start_sec}s")
+        print(f"  ✨ 解析成功: 開始 {start_sec}s")
         return start_sec, caption
     except Exception as e:
-        print(f"  ⚠️ AI解析失敗 (スキップします): {e}")
+        print(f"  ⚠️ AI解析スキップ: {e}")
         return 0, None
 
 def main():
@@ -120,7 +120,7 @@ def main():
         if not os.path.exists(temp_input): return
 
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source_account'])
-        if not ai_caption: ai_caption = f"【速報】{video_data['title']}\n\n引用：{video_data['source_account']}\n#プロ野球"
+        if not ai_caption: ai_caption = f"【朗報】最高のプレーを見てくれ！\n\n引用：{video_data['source_account']}\n#野球 #プロ野球 #MLB"
         
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
@@ -131,7 +131,10 @@ def main():
                 up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
                 if up_res.status_code == 200:
                     public_url = up_res.json()['data']['url'].replace('https://tmpfiles.org/', 'https://tmpfiles.org/dl/')
-                    print(f"📸 Instagramへ送信中...")
+                    print(f"📥 クラウド保存完了。5秒待機中...")
+                    time.sleep(5) # 動画が確実に読み取れるようになるまで待機
+
+                    print(f"📸 Instagram送信開始...")
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                     
                     if 'id' in post_res:
@@ -139,25 +142,24 @@ def main():
                         print(f"⏳ 処理待機 (ID: {creation_id})...")
                         for i in range(30):
                             time.sleep(30)
-                            status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,failure_reason', 'access_token': ACCESS_TOKEN}).json()
+                            status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+                            status = status_res.get('status_code')
+                            print(f"  [{i+1}/30] API Status: {status}")
                             
-                            # ステータス取得の柔軟な判定
-                            status = status_res.get('status_code') or status_res.get('status')
-                            print(f"  [{i+1}/30] API Response: {status_res}")
-                            
-                            if status == 'FINISHED' or 'status_code' not in status_res:
-                                # FINISHED または情報が取れないがエラーも出ていない場合は公開を試みる
+                            if status == 'FINISHED':
                                 print(f"🚀 公開リクエスト...")
                                 pub_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
                                 if 'id' in pub_res:
                                     print(f"🏁 投稿完了！ 投稿ID: {pub_res['id']}")
                                     stats[video_data['type']] += 1
                                     save_stats(stats); return
-                                elif i > 5: # 5回以上待機して公開失敗したなら終了
+                                else:
                                     print(f"❌ 公開失敗: {pub_res}"); return
                             elif status == 'ERROR':
-                                print(f"❌ 処理エラー: {status_res.get('failure_reason')}"); return
-        except Exception as e: print(f"❌ エラー: {e}")
+                                print(f"❌ 処理エラー: {status_res}"); return
+                    else:
+                        print(f"❌ コンテナ作成失敗: {post_res}")
+        except Exception as e: print(f"❌ システムエラー: {e}")
     else: print("😴 投稿対象なし。")
 
 if __name__ == "__main__":
