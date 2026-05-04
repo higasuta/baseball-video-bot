@@ -55,19 +55,50 @@ def get_mlb_video(history, is_test_mode):
     return None
 
 def analyze_video_with_ai(video_path, title, source_account):
-    print(f"🧠 AIによる動画解析中...")
+    print(f"🧠 AIによる動画解析中 (Gemini)...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
-        prompt = f"野球動画({title})を解析し「START:秒」と「CAPTION:内容」を出力せよ。語り口調。引用：{source_account}と記載。"
+        # あなたの環境で動作する正しいモデル名を使用
+        model = genai.GenerativeModel("gemini-flash-latest")
+        prompt = f"野球動画({title})を解析し「START:秒」と「CAPTION:内容」を出力せよ。語り口調。引用：{source_account}と記載せよ。"
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
         start_match = re.search(r"START:(\d+)", res_text); start_sec = int(start_match.group(1)) if start_match else 0
         caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL); ai_caption = caption_match.group(1).strip() if caption_match else None
+        print(f"  ✨ AI解析成功: 開始 {start_sec}s")
         return start_sec, ai_caption
-    except: return 0, None
+    except Exception as e:
+        print(f"⚠️ AI解析失敗: {e}")
+        return 0, None
+
+def upload_video_robust(file_path):
+    """複数のアップローダーを順に試す、フリーズ防止機能付き"""
+    # 1. Catbox (Metaとの相性最強)
+    print(f"📥 アップロード中 (Route A)...")
+    try:
+        with open(file_path, 'rb') as f:
+            res = requests.post('https://catbox.moe/user/api.php', data={'reqtype': 'fileupload'}, files={'fileToUpload': f}, timeout=40)
+            if res.status_code == 200: return res.text.strip()
+    except: pass
+
+    # 2. Uguu (安定)
+    print(f"📥 アップロード中 (Route B)...")
+    try:
+        with open(file_path, 'rb') as f:
+            res = requests.post('https://uguu.se/api.php?d=upload-tool', files={'file': f}, timeout=40)
+            if res.status_code == 200: return res.text.strip()
+    except: pass
+
+    # 3. file.io (最終手段)
+    print(f"📥 アップロード中 (Route C)...")
+    try:
+        with open(file_path, 'rb') as f:
+            res = requests.post('https://file.io', files={'file': f}, timeout=40)
+            if res.status_code == 200: return res.json().get('link')
+    except: pass
+    return None
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
@@ -75,62 +106,51 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    print(f"⚾️ MLBルートから確実に動画を確保します...")
+    print(f"⚾️ 探索開始...")
     video_data = get_mlb_video(history, is_test_mode)
 
     if video_data:
         print(f"🎯 ターゲット確定: {video_data['title']}")
         temp_input = "temp_video.mp4"
-        
-        # MLBなら100%成功するcurlダウンロード
         subprocess.run(['curl', '-L', video_data['url'], '-o', temp_input])
         
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
             print("❌ ダウンロード失敗。"); return
 
-        # AI & 加工
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source'])
         if not ai_caption: ai_caption = f"【朗報】最高のプレー！\n#野球 #MLB"
         
         output_file = "output.mp4"
-        # Instagramが「これは破損ファイルではない」と認めるよう、画質を過剰に盛る
+        # 画質を5000kに盛り、Instagramの拒絶（2207082）を回避する
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5000k', '-minrate', '3000k', '-maxrate', '8000k', '-bufsize', '10000k', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
+        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5000k', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
-        try:
-            print(f"📥 インスタ用サーバーへアップロード中...")
-            with open(output_file, 'rb') as f:
-                # 信頼性の高い uguu.se を使用
-                up_res = requests.post('https://uguu.se/api.php?d=upload-tool', files={'file': f}, timeout=60)
-                if up_res.status_code == 200:
-                    public_url = up_res.text.strip()
-                    print(f"✅ 公開URL: {public_url}")
-                    time.sleep(15) # 安定待機
+        public_url = upload_video_robust(output_file)
+        if public_url:
+            print(f"✅ 公開URL: {public_url}")
+            time.sleep(15) 
 
-                    print(f"📸 Instagram送信開始...")
-                    post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+            print(f"📸 Instagram送信開始...")
+            post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+            
+            if 'id' in post_res:
+                creation_id = post_res['id']
+                print(f"⏳ ステータス監視中 (ID: {creation_id})...")
+                for i in range(20):
+                    time.sleep(30)
+                    status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status,failure_reason', 'access_token': ACCESS_TOKEN}).json()
+                    status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                    print(f"  [{i+1}/20] API Response: {status}")
                     
-                    if 'id' in post_res:
-                        creation_id = post_res['id']
-                        print(f"⏳ ステータス監視中 (ID: {creation_id})...")
-                        for i in range(20):
-                            time.sleep(30)
-                            status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
-                            
-                            # 全ての情報をログに出す
-                            print(f"  [{i+1}/20] API Response: {status_res}")
-                            
-                            status = (status_res.get('status_code') or status_res.get('status') or "").upper()
-                            
-                            if 'FINISHED' in status:
-                                print(f"🚀 公開リクエスト...")
-                                requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
-                                with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
-                                stats[video_data['type']] += 1; save_stats(stats); print(f"🏁 投稿完了！"); return
-                            elif 'ERROR' in status:
-                                print(f"❌ 処理失敗。"); return
-                    else: print(f"❌ コンテナ作成失敗: {post_res}")
-        except Exception as e: print(f"❌ システムエラー: {e}")
+                    if 'FINISHED' in status:
+                        print(f"🚀 公開実行...")
+                        pub_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+                        if 'id' in pub_res:
+                            print(f"🏁 投稿完了！"); stats[video_data['type']] += 1; save_stats(stats)
+                            with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n"); return
+                    elif 'ERROR' in status:
+                        print(f"❌ 処理失敗: {status_res}"); return
+            else: print(f"❌ コンテナ作成失敗: {post_res}")
     else: print("😴 投稿対象なし。")
 
 if __name__ == "__main__":
