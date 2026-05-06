@@ -32,7 +32,6 @@ def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def get_mlb_video(history, is_test_mode):
-    """MLB APIから日本人動画を取得（ブロックされない確実なルート）"""
     print(f"🔍 MLB(API) をスキャン中...")
     for day_offset in range(3):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -62,8 +61,10 @@ def analyze_video_with_ai(video_path, title, source_account):
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
-        model = genai.GenerativeModel("gemini-1.5-flash") # 安定版を使用
-        prompt = f"野球動画({title})を解析し「START:秒」と「CAPTION:内容」を出力せよ。語り口調。引用：{source_account}と記載。"
+        
+        # 確実に通るモデル名を指定
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"野球動画({title})を解析し「START:秒」と「CAPTION:内容」を出力せよ。引用：{source_account}と記載。"
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
@@ -75,31 +76,18 @@ def analyze_video_with_ai(video_path, title, source_account):
         print(f"  ⚠️ AI解析スキップ: {e}")
         return 0, None
 
-def upload_to_gofile_fixed(file_path):
-    """GoFile API を使用した確実なアップロード（GitHub Actions対応版）"""
-    print(f"📥 GoFileへアップロード中...")
+def upload_to_catbox(file_path):
+    """Instagramが直接読み取れる直リンク(files.catbox.moe)を取得"""
+    print(f"📥 Catbox(直リンク)へアップロード中...")
     try:
-        # 1. サーバー取得（リトライ付き）
-        server_res = requests.get('https://api.gofile.io/servers', timeout=20).json()
-        if server_res['status'] != 'ok': return None
-        server = server_res['data']['servers'][0]['name']
-        
-        # 2. アップロード実行
         with open(file_path, 'rb') as f:
-            up_res = requests.post(f'https://{server}.gofile.io/contents/uploadfile', files={'file': f}, timeout=60).json()
-            if up_res['status'] == 'ok':
-                # Instagramが直接動画として認識できる「downloadPage」リンクを取得
-                return up_res['data']['downloadPage']
+            # reqtype: fileupload を明示
+            res = requests.post('https://catbox.moe/user/api.php', data={'reqtype': 'fileupload'}, files={'fileToUpload': f}, timeout=60)
+            if res.status_code == 200:
+                url = res.text.strip()
+                if "https" in url: return url
     except Exception as e:
-        print(f"  ❌ GoFile失敗: {e}")
-    
-    # 最終予備: Catbox (multipart/form-dataを明示)
-    print(f"📥 予備(Catbox)で再試行...")
-    try:
-        with open(file_path, 'rb') as f:
-            res = requests.post('https://catbox.moe/user/api.php', data={'reqtype': 'fileupload'}, files={'fileToUpload': f}, timeout=40)
-            if res.status_code == 200: return res.text.strip()
-    except: pass
+        print(f"  ❌ Catbox失敗: {e}")
     return None
 
 def main():
@@ -109,7 +97,6 @@ def main():
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     print(f"⚾️ 探索開始...")
-    # MLBルートから確実に動画を確保
     video_data = get_mlb_video(history, is_test_mode)
 
     if video_data:
@@ -125,35 +112,38 @@ def main():
         
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        # 画質を上げ(crf 18, 4M), +faststart で破損判定を回避
-        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '4M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
+        # Instagramが絶対に拒絶しないスペックで書き出し
+        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '4M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', output_file])
         
-        public_url = upload_to_gofile_fixed(output_file)
+        # 投稿（Catboxによる直リンク）
+        public_url = upload_to_catbox(output_file)
         if public_url:
-            print(f"✅ 公開URL: {public_url}")
-            time.sleep(15) # 安定待機
+            print(f"✅ 直リンク確保: {public_url}")
+            time.sleep(10) # 念のため待機
 
             print(f"📸 Instagram送信開始...")
-            post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+            post_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
+            params = {'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}
+            post_res = requests.post(post_url, data=params).json()
             
             if 'id' in post_res:
                 creation_id = post_res['id']
-                print(f"⏳ 処理待機 (ID: {creation_id})...")
+                print(f"⏳ ステータス監視 (ID: {creation_id})...")
                 for i in range(20):
                     time.sleep(30)
                     status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
-                    print(f"  [{i+1}/20] API Response: {status_res}")
-                    
                     status = (status_res.get('status_code') or status_res.get('status') or "PROCESSING").upper()
+                    print(f"  [{i+1}/20] API Response: {status}")
+                    
                     if 'FINISHED' in status:
                         print(f"🚀 公開実行...")
-                        pub_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
-                        if 'id' in pub_res:
-                            print(f"🏁 投稿完了！ 投稿ID: {pub_res['id']}")
+                        publish_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+                        if 'id' in publish_res:
+                            print(f"🏁 投稿完了！ 投稿ID: {publish_res['id']}")
                             with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
                             stats[video_data['type']] += 1; save_stats(stats); return
                     elif 'ERROR' in status:
-                        print(f"❌ 処理失敗: {status_res}"); return
+                        print(f"❌ Instagram処理失敗: {status_res}"); return
             else: print(f"❌ コンテナ作成失敗: {post_res}")
     else: print("😴 投稿対象なし。")
 
