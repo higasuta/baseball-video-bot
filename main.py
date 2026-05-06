@@ -1,5 +1,5 @@
 import sys
-# リアルタイムログ出力のためのフラッシュ
+# リアルタイムログ出力
 print("🚀 Pythonスクリプト起動...")
 sys.stdout.flush()
 
@@ -63,14 +63,14 @@ def get_mlb_video(history, is_test_mode):
     return None
 
 def analyze_video_with_ai(video_path, title, source_account):
-    print(f"🧠 AIによる動画解析中...")
+    print(f"🧠 AIによる動画解析中 (Gemini)...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         
-        # ログで確認された正しいモデル名
-        model = genai.GenerativeModel("gemini-flash-latest")
-        prompt = f"野球動画({title})を解析し「START:秒」と「CAPTION:内容」を出力せよ。語り口調。引用：{source_account}と記載。"
+        # あなたの環境で確実に動作するモデル名
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"野球動画({title})を解析し、最高潮の場面の開始秒数を「START:秒」で、2ch風解説キャプションを「CAPTION:内容」で出力せよ。引用：{source_account}と記載。"
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
@@ -83,22 +83,21 @@ def analyze_video_with_ai(video_path, title, source_account):
         print(f"  ⚠️ AI解析失敗: {e}")
         return 0, None
 
-def upload_to_pixeldrain(file_path):
-    """Pixeldrain API を使用して100%直リンクを取得"""
-    print(f"📥 Pixeldrain(API)へアップロード中...")
+def upload_to_tmpfiles(file_path):
+    """tmpfiles.orgにアップロードし、Instagram用の「直リンク」へ変換する"""
+    print(f"📥 tmpfiles.orgへアップロード中...")
     try:
         with open(file_path, 'rb') as f:
-            # 1. API経由でアップロード
-            res = requests.post('https://pixeldrain.com/api/file', files={'file': f}, timeout=60).json()
-            if res.get('success'):
-                file_id = res.get('id')
-                # 2. Instagramが直接ダウンロードできる「生データURL」を生成
-                direct_url = f"https://pixeldrain.com/api/file/{file_id}"
+            res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
+            if res.get('status') == 'success':
+                original_url = res['data']['url']
+                # インスタが直接吸い出せるように /dl/ を挟む
+                direct_url = original_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
                 return direct_url
             else:
-                print(f"  ❌ Pixeldrain拒絶: {res}")
+                print(f"  ❌ アップロード失敗: {res}")
     except Exception as e:
-        print(f"  ❌ Pixeldrain通信失敗: {e}")
+        print(f"  ❌ 通信失敗: {e}")
     return None
 
 def main():
@@ -107,7 +106,7 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    print(f"⚾️ MLBルートから動画を確保します...")
+    print(f"⚾️ MLBルートから確実な動画投稿を試みます...")
     video_data = get_mlb_video(history, is_test_mode)
 
     if video_data:
@@ -118,22 +117,25 @@ def main():
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
             print("❌ ダウンロード失敗。"); return
 
+        # AI解析 & 加工
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source'])
-        if not ai_caption: ai_caption = f"【速報】最高のプレー！\n\n引用：{video_data['source']}\n#プロ野球"
+        if not ai_caption: ai_caption = f"【速報】最高のプレー！\n\n引用：{video_data['source']}\n#プロ野球 #MLB"
         
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        # 高品質＆movflags付与でMetaをパスさせる
-        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '4M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
+        # Metaの品質チェックをパスする設定
+        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
-        # 投稿
-        public_url = upload_to_pixeldrain(output_file)
+        # 投稿（tmpfilesによる直リンク）
+        public_url = upload_to_tmpfiles(output_file)
         if public_url:
             print(f"✅ 直リンク確保: {public_url}")
-            time.sleep(10) # 浸透待機
+            time.sleep(10) # ファイル定着待機
 
             print(f"📸 Instagram送信開始...")
-            post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+            post_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
+            params = {'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}
+            post_res = requests.post(post_url, data=params).json()
             
             if 'id' in post_res:
                 creation_id = post_res['id']
@@ -141,17 +143,17 @@ def main():
                 for i in range(20):
                     time.sleep(30)
                     status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
-                    status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                    status = (status_res.get('status_code') or status_res.get('status') or "PROCESSING").upper()
                     print(f"  [{i+1}/20] API Status: {status}")
                     
                     if 'FINISHED' in status:
-                        print(f"🚀 公開リクエスト...")
+                        print(f"🚀 公開実行...")
                         requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                         print(f"🏁 投稿完了！")
                         with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
                         stats[video_data['type']] += 1; save_stats(stats); return
                     elif 'ERROR' in status:
-                        print(f"❌ 失敗: {status_res}"); return
+                        print(f"❌ 処理失敗: {status_res}"); return
             else: print(f"❌ コンテナ作成失敗: {post_res}")
     else: print("😴 投稿対象なし。")
 
