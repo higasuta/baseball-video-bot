@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力
-print("🚀 プレイボール速報・システム最終形態 起動...")
+print("🚀 プレイボール速報・システム稼働中...")
 sys.stdout.flush()
 
 import requests
@@ -23,8 +23,10 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# 日本人選手フィルター
 JPN_KEYWORDS = ["大谷", "山本", "ダルビッシュ", "鈴木誠也", "吉田正尚", "今永", "松井裕樹", "千賀", "前田健太", "菊池雄星", "ohtani", "yamamoto", "imanaga", "菅野"]
-BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update"]
+# 【強化】除外キーワード：これらがタイトルに入っている地味な動画は無視する
+BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup"]
 
 def get_stats():
     if os.path.exists('stats.json'):
@@ -34,11 +36,35 @@ def get_stats():
     return {"npb": 7, "mlb": 3}
 
 def save_stats(stats):
-    with open('stats.json', 'get_stats') as f:
+    # 【修正】モードを 'w' に戻しました
+    with open('stats.json', 'w') as f:
         json.dump(stats, f)
 
+def get_npb_video(history):
+    """YouTube RSSからNPB動画を取得（GitHub IP対策のためRSSを使用）"""
+    feeds = [
+        {"name": "パ・リーグTV", "id": "UC0v-pxTo1XamIDE-f__Ad0Q"},
+        {"name": "NPB公式", "id": "UC7vYid8pCUpIOn85X_2f_ig"}
+    ]
+    for feed in feeds:
+        url = f"https://www.youtube.com/feeds/videos.xml?channel_id={feed['id']}"
+        print(f"🔍 NPBスキャン中 (RSS): {feed['name']}")
+        try:
+            res = requests.get(url, timeout=20)
+            if res.status_code != 200: continue
+            root = ET.fromstring(res.content)
+            ns = {'ns': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
+            for entry in root.findall('ns:entry', ns):
+                v_id = entry.find('yt:videoId', ns).text
+                title = entry.find('ns:title', ns).text
+                if v_id not in history:
+                    print(f"✅ NPB動画候補を発見: {title}")
+                    return {"title": title, "url": f"https://www.youtube.com/watch?v={v_id}", "id": v_id, "type": "npb", "source": f"YouTube {feed['name']}"}
+        except: continue
+    return None
+
 def get_mlb_video(history, is_test_mode):
-    """MLB APIから確実に動画を取得"""
+    """MLB APIから動画を取得"""
     print(f"🔍 MLB(API) をスキャン中...")
     for day_offset in range(3):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -54,11 +80,15 @@ def get_mlb_video(history, is_test_mode):
                         for item in items:
                             title = item.get('headline', '')
                             v_id = str(item.get('id'))
-                            video_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
+                            video_url = next((p['url'] for p in item.get('playbacks', []) if p['name'] == 'mp4Avc'), None)
                             if video_url and v_id not in history:
+                                # 【強化】除外ワードが入っている動画はスキップ
+                                if any(kw in title.lower() for kw in BLACK_KEYWORDS):
+                                    continue
+                                
                                 if any(kw in title.lower() for kw in JPN_KEYWORDS) or is_test_mode:
-                                    if not any(kw in title.lower() for kw in BLACK_KEYWORDS):
-                                        return {"title": title, "url": video_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"}
+                                    print(f"✅ MLB動画候補を発見: {title}")
+                                    return {"title": title, "url": video_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"}
                     except: continue
         except: continue
     return None
@@ -67,14 +97,11 @@ def analyze_video_with_ai(video_path, title, source_account):
     print(f"🧠 AIによる動画解析中 (Gemini)...")
     try:
         video_file = genai.upload_file(path=video_path)
-        while video_file.state.name == "PROCESSING":
-            time.sleep(2)
-            video_file = genai.get_file(video_file.name)
+        while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         
-        # あなたの環境のリストに存在した正確なモデル名 'gemini-flash-latest' を使用
-        model = genai.GenerativeModel("gemini-flash-latest")
+        # あなたの環境に合わせた正しい名称
+        model = genai.GenerativeModel("gemini-1.5-flash-latest")
         
-        # 【指示文のみ修正】ネットスラングを排除し、皮肉と分析を強化
         prompt = f"""
         野球動画（タイトル：{title}）を解析し、以下の形式で出力せよ。
 
@@ -117,11 +144,8 @@ def upload_to_tmpfiles(file_path):
             res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
             if res.get('status') == 'success':
                 original_url = res['data']['url']
-                # HTTPS直リンクへの変換
-                direct_url = original_url.replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                return direct_url
-    except Exception as e:
-        print(f"  ❌ 通信失敗: {e}")
+                return original_url.replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
+    except: pass
     return None
 
 def main():
@@ -131,23 +155,37 @@ def main():
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     print(f"⚾️ スキャン開始...")
-    video_data = get_mlb_video(history, is_test_mode)
+    
+    # 【NPB復活】まずはNPBを探す
+    video_data = get_npb_video(history)
+    
+    # NPBがない、または比率的にMLBがOKな場合はMLBを探す
+    if not video_data:
+        total = stats['npb'] + stats['mlb']
+        ratio = stats['mlb'] / total if total > 0 else 0
+        if is_test_mode or ratio < 0.40:
+            video_data = get_mlb_video(history, is_test_mode)
 
     if video_data:
         print(f"🎯 ターゲット確定: {video_data['title']}")
         temp_input = "temp_video.mp4"
-        subprocess.run(['curl', '-L', video_data['url'], '-o', temp_input])
+        
+        # ダウンロード
+        if video_data['type'] == 'npb':
+            # YouTubeはGitHubからだと403エラーになりやすいので android 偽装
+            subprocess.run(['yt-dlp', '-o', temp_input, '--extractor-args', 'youtube:player_client=android', video_data['url']])
+        else:
+            subprocess.run(['curl', '-L', video_data['url'], '-o', temp_input])
         
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
             print("❌ ダウンロード失敗。"); return
 
         # AI解析 & 加工
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source'])
-        if not ai_caption: ai_caption = f"【朗報】最高のプレー！\n\n引用：{video_data['source']}\n#プロ野球 #MLB"
+        if not ai_caption: ai_caption = f"【速報】最高のプレー！\n\n引用：{video_data['source']}\n#プロ野球 #MLB"
         
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        # Metaが好む高画質・安定設定
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
         public_url = upload_to_tmpfiles(output_file)
