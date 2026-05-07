@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力
-print("🚀 プレイボール速報・システム稼働中...")
+print("🚀 プレイボール速報・システム最終形態 起動...")
 sys.stdout.flush()
 
 import requests
@@ -34,7 +34,6 @@ def get_stats():
     return {"npb": 7, "mlb": 3}
 
 def save_stats(stats):
-    # 【修正箇所】'get_stats' を 'w' に修正！
     with open('stats.json', 'w') as f:
         json.dump(stats, f)
 
@@ -68,11 +67,13 @@ def analyze_video_with_ai(video_path, title, source_account):
     print(f"🧠 AIによる動画解析中 (Gemini)...")
     try:
         video_file = genai.upload_file(path=video_path)
-        while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
+        while video_file.state.name == "PROCESSING":
+            time.sleep(2)
+            video_file = genai.get_file(video_file.name)
         
-        # あなたの環境で過去に成功が確認されたモデル名 'gemini-flash-latest' に固定
+        # あなたの環境のリストに存在した正確なモデル名 'gemini-flash-latest' を使用
         model = genai.GenerativeModel("gemini-flash-latest")
-        prompt = f"野球動画({title})を解析し、見どころ開始秒数を「START:秒」で、2ch風解説キャプションを「CAPTION:内容」で出力せよ。引用：{source_account}と記載。"
+        prompt = f"野球動画({title})を解析し、最高潮の場面の開始秒数を「START:秒」で、2ch風解説キャプションを「CAPTION:内容」で出力せよ。引用：{source_account}と記載。"
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
@@ -92,7 +93,7 @@ def upload_to_tmpfiles(file_path):
             res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
             if res.get('status') == 'success':
                 original_url = res['data']['url']
-                # HTTPS直リンク変換
+                # HTTPS直リンクへの変換
                 direct_url = original_url.replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
                 return direct_url
     except Exception as e:
@@ -122,11 +123,12 @@ def main():
         
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+        # Metaが好む高画質・安定設定
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
         public_url = upload_to_tmpfiles(output_file)
         if public_url:
-            print(f"✅ 直リンク確保(HTTPS): {public_url}")
+            print(f"✅ 直リンク確保: {public_url}")
             time.sleep(10)
 
             print(f"📸 Instagram送信開始...")
@@ -148,7 +150,6 @@ def main():
                         publish_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
                         if 'id' in publish_res:
                             print(f"🏁 投稿完了！ 投稿ID: {publish_res['id']}")
-                            # 成功時のみ履歴と統計を更新
                             with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
                             stats[video_data['type']] += 1
                             save_stats(stats); return
