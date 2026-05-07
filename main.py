@@ -34,7 +34,7 @@ def get_stats():
     return {"npb": 7, "mlb": 3}
 
 def save_stats(stats):
-    with open('stats.json', 'w') as f:
+    with open('stats.json', 'get_stats') as f:
         json.dump(stats, f)
 
 def get_mlb_video(history, is_test_mode):
@@ -73,7 +73,31 @@ def analyze_video_with_ai(video_path, title, source_account):
         
         # あなたの環境のリストに存在した正確なモデル名 'gemini-flash-latest' を使用
         model = genai.GenerativeModel("gemini-flash-latest")
-        prompt = f"野球動画({title})を解析し、最高潮の場面の開始秒数を「START:秒」で、2ch風解説キャプションを「CAPTION:内容」で出力せよ。引用：{source_account}と記載。"
+        
+        # 【指示文のみ修正】ネットスラングを排除し、皮肉と分析を強化
+        prompt = f"""
+        野球動画（タイトル：{title}）を解析し、以下の形式で出力せよ。
+
+        START:[秒]
+        CAPTION:[内容]
+
+        【キャプション構成ルール】
+        ・一段目：【 】で囲った、見た人を一気に引き込む見出し。単なる事実ではなく、皮肉や驚きを交えた鋭い2chまとめ風タイトルにせよ（例：【異常】、【悲報】、【もはや○○】など）。
+        ・二段目：ニュースの核心を2〜3行で簡潔に要約。
+        ・三段目：アナリスト視点からの熱い、あるいは皮肉のきいた鋭い所感。
+
+        【禁止事項（厳守）】
+        ・「ワロタ」「www」「ｷﾀ━━」「乙」などの古いネットスラングや顔文字、AAは一切禁止。
+        ・「〜ですね」「〜ですよ」などの敬語や丁寧語、視聴者への問いかけは禁止。
+        ・標準語の「だ・である」調を徹底せよ。
+        ・ラベル（見出し：、要約：等）は出力不要。
+
+        【ハッシュタグ】
+        ・登場人物名、チーム名を個別にタグ化（中黒「・」は削除）。
+        ・合計25〜29個付与。
+        引用：{source_account}を最後に記載。
+        """
+        
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
