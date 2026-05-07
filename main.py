@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力
-print("🚀 Pythonスクリプト起動...")
+print("🚀 プレイボール速報・システム起動...")
 sys.stdout.flush()
 
 import requests
@@ -34,9 +34,10 @@ def get_stats():
     return {"npb": 7, "mlb": 3}
 
 def save_stats(stats):
-    with open('stats.json', 'w') as f: json.dump(stats, f)
+    with open('stats.json', 'get_stats') as f: json.dump(stats, f)
 
 def get_mlb_video(history, is_test_mode):
+    """MLB APIから確実に動画を取得"""
     print(f"🔍 MLB(API) をスキャン中...")
     for day_offset in range(3):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -52,7 +53,7 @@ def get_mlb_video(history, is_test_mode):
                         for item in items:
                             title = item.get('headline', '')
                             v_id = str(item.get('id'))
-                            video_url = next((p['url'] for p in item.get('playbacks', []) if p['name'] == 'mp4Avc'), None)
+                            video_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                             if video_url and v_id not in history:
                                 if any(kw in title.lower() for kw in JPN_KEYWORDS) or is_test_mode:
                                     if not any(kw in title.lower() for kw in BLACK_KEYWORDS):
@@ -67,9 +68,9 @@ def analyze_video_with_ai(video_path, title, source_account):
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         
-        # あなたの環境で動作する「gemini-1.5-flash-latest」を使用
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
-        prompt = f"野球動画({title})を解析し、見どころ開始秒数を「START:秒」で、2chまとめ風解説キャプションを「CAPTION:内容」で出力せよ。引用：{source_account}と記載。"
+        # モデル名を 'gemini-1.5-flash' に修正（v1beta環境で最も安定）
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"野球動画({title})を解析し、見どころ開始秒数を「START:秒」で、2ch風解説キャプションを「CAPTION:内容」で出力せよ。引用：{source_account}と記載。"
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
@@ -83,12 +84,13 @@ def analyze_video_with_ai(video_path, title, source_account):
         return 0, None
 
 def upload_to_tmpfiles(file_path):
-    print(f"📥 tmpfiles.orgへアップロード中...")
+    print(f"📥 外部サーバーへアップロード中...")
     try:
         with open(file_path, 'rb') as f:
             res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
             if res.get('status') == 'success':
                 original_url = res['data']['url']
+                # 強制HTTPS化と直リンク変換
                 direct_url = original_url.replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
                 return direct_url
     except Exception as e:
@@ -101,7 +103,7 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    print(f"⚾️ MLBルートから確実な動画投稿を試みます...")
+    print(f"⚾️ スキャン開始...")
     video_data = get_mlb_video(history, is_test_mode)
 
     if video_data:
@@ -117,6 +119,7 @@ def main():
         
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+        # Metaが好む高画質・安定設定
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
         public_url = upload_to_tmpfiles(output_file)
@@ -125,10 +128,13 @@ def main():
             time.sleep(10)
 
             print(f"📸 Instagram送信開始...")
-            post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+            post_url = f"https://graph.facebook.com/v21.0/{INSTA_ID}/media"
+            params = {'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}
+            post_res = requests.post(post_url, data=params).json()
             
             if 'id' in post_res:
                 creation_id = post_res['id']
+                print(f"⏳ 処理待機 (ID: {creation_id})...")
                 for i in range(20):
                     time.sleep(30)
                     status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
