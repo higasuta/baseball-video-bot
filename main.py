@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力
-print("🚀 プレイボール速報・システム起動...")
+print("🚀 プレイボール速報・システム稼働中...")
 sys.stdout.flush()
 
 import requests
@@ -34,7 +34,9 @@ def get_stats():
     return {"npb": 7, "mlb": 3}
 
 def save_stats(stats):
-    with open('stats.json', 'get_stats') as f: json.dump(stats, f)
+    # 【修正箇所】'get_stats' を 'w' に修正！
+    with open('stats.json', 'w') as f:
+        json.dump(stats, f)
 
 def get_mlb_video(history, is_test_mode):
     """MLB APIから確実に動画を取得"""
@@ -68,8 +70,8 @@ def analyze_video_with_ai(video_path, title, source_account):
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         
-        # モデル名を 'gemini-1.5-flash' に修正（v1beta環境で最も安定）
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # あなたの環境で過去に成功が確認されたモデル名 'gemini-flash-latest' に固定
+        model = genai.GenerativeModel("gemini-flash-latest")
         prompt = f"野球動画({title})を解析し、見どころ開始秒数を「START:秒」で、2ch風解説キャプションを「CAPTION:内容」で出力せよ。引用：{source_account}と記載。"
         response = model.generate_content([prompt, video_file])
         res_text = response.text
@@ -90,7 +92,7 @@ def upload_to_tmpfiles(file_path):
             res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
             if res.get('status') == 'success':
                 original_url = res['data']['url']
-                # 強制HTTPS化と直リンク変換
+                # HTTPS直リンク変換
                 direct_url = original_url.replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
                 return direct_url
     except Exception as e:
@@ -114,12 +116,12 @@ def main():
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
             print("❌ ダウンロード失敗。"); return
 
+        # AI解析 & 加工
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source'])
         if not ai_caption: ai_caption = f"【朗報】最高のプレー！\n\n引用：{video_data['source']}\n#プロ野球 #MLB"
         
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        # Metaが好む高画質・安定設定
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
         public_url = upload_to_tmpfiles(output_file)
@@ -146,8 +148,10 @@ def main():
                         publish_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
                         if 'id' in publish_res:
                             print(f"🏁 投稿完了！ 投稿ID: {publish_res['id']}")
+                            # 成功時のみ履歴と統計を更新
                             with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
-                            stats[video_data['type']] += 1; save_stats(stats); return
+                            stats[video_data['type']] += 1
+                            save_stats(stats); return
             else: print(f"❌ コンテナ作成失敗: {post_res}")
     else: print("😴 投稿対象なし。")
 
