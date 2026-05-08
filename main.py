@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力
-print("🚀 プレイボール速報・システム再起動（NPB優先・連投防止モード）...")
+print("🚀 プレイボール速報・システム再起動（NPB解析エンジン強化版）...")
 sys.stdout.flush()
 
 import requests
@@ -25,15 +25,8 @@ if GEMINI_API_KEY:
 # 日本人選手キーワード
 JPN_KEYWORDS = ["大谷", "山本", "ダルビッシュ", "鈴木誠也", "吉田正尚", "今永", "松井裕樹", "千賀", "前田健太", "菊池雄星", "ohtani", "yamamoto", "imanaga", "菅野", "senga", "darvish"]
 
-# 【超厳選】排除キーワード
-BLACK_KEYWORDS = [
-    "probable", "pitchers", "lineup", "interview", "press", "availability", 
-    "roster", "update", "alignment", "summary", "preview", "warmup", 
-    "positioning", "against", "at bat", "statcast", "recap", "daily",
-    "measuring", "animated", "distance", "deep dive", "analyzing", "data viz",
-    "condensed", "breaking down", "bat tracking", "talks", "more", 
-    "first pitch", "pre-game", "ceremonial", "wild pitch"
-]
+# 排除キーワード（地味なもの、長すぎるもの）
+BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights"]
 
 def get_stats():
     if os.path.exists('stats.json'):
@@ -63,9 +56,9 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def get_npb_candidates(history):
-    """スポナビのビデオ一覧をHTML解析して確実に取得"""
+    """スポナビの構造変化に対応した強化版スキャナー"""
     url = "https://sports.yahoo.co.jp/video/list/promo/live/baseball/npb"
-    print(f"🔍 NPB動画を探索中 (スポナビ解析): {url}")
+    print(f"🔍 NPB動画を探索中 (スポナビ最新構造解析): {url}")
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
     
@@ -74,19 +67,34 @@ def get_npb_candidates(history):
         res = requests.get(url, headers=headers, timeout=20)
         if res.status_code != 200: return []
         
-        # HTMLから動画リンクとタイトルを抽出（簡易的な正規表現解析）
-        # <a href="/video/player/XXXX" ... 形式を抽出
-        matches = re.findall(r'href="(/video/player/(\d+))"[^>]*?><h3[^>]*?>(.*?)</h3>', res.text)
+        # 解析ロジック強化: IDとタイトルをより広範囲に探す
+        # /video/player/(\d+) のパターンを全て抜き出す
+        video_entries = re.findall(r'/video/player/(\d+)', res.text)
+        # 重複を排除してリスト化
+        unique_ids = list(dict.fromkeys(video_entries))
         
-        for link, v_id, title in matches:
-            v_url = "https://sports.yahoo.co.jp" + link
+        print(f"  👉 ページ内に {len(unique_ids)} 件の動画リンクを検出。")
+
+        for v_id in unique_ids:
             if v_id not in history:
-                if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
-                print(f"  ✅ NPB候補発見: {title}")
-                candidates.append({
-                    "title": title, "url": v_url, "id": v_id, 
-                    "type": "npb", "source": "スポーツナビ", "priority": 1, "is_hot": False
-                })
+                # 各動画のタイトルを個別に取得（タイトルが取れないとAIが困るため）
+                # playerページからタイトルを抽出
+                v_url = f"https://sports.yahoo.co.jp/video/player/{v_id}"
+                try:
+                    video_page = requests.get(v_url, headers=headers, timeout=10).text
+                    title_match = re.search(r'<title>(.*?)</title>', video_page)
+                    title = title_match.group(1).split('-')[0].strip() if title_match else "NPBハイライト"
+                    
+                    if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
+                    
+                    print(f"  ✅ NPB候補発見: {title}")
+                    candidates.append({
+                        "title": title, "url": v_url, "id": v_id, 
+                        "type": "npb", "source": "スポーツナビ", "priority": 1
+                    })
+                    # 1週間分ということで、とりあえず10件程度見つかれば十分
+                    if len(candidates) >= 10: break
+                except: continue
     except Exception as e:
         print(f"  ⚠️ NPBスキャン失敗: {e}")
     
@@ -112,11 +120,19 @@ def get_mlb_candidates(history, is_test_mode):
                             v_url = next((p['url'] for p in item.get('playbacks', []) if p['name'] == 'mp4Avc'), None)
                             if v_url and v_id not in history:
                                 if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
+                                
+                                # 【強化】テストモードであっても、日本人キーワードがないMLB動画は優先度を下げる（または無視）
                                 is_jpn = any(kw in title.lower() for kw in JPN_KEYWORDS)
-                                if is_jpn or is_test_mode:
+                                if is_jpn:
                                     candidates.append({
                                         "title": title, "url": v_url, "id": v_id, 
-                                        "type": "mlb", "source": "@MLBJapan", "priority": 2, "is_hot": False
+                                        "type": "mlb", "source": "@MLBJapan", "priority": 2
+                                    })
+                                elif is_test_mode and "home run" in title.lower():
+                                    # 日本人以外でもホームランなら候補には入れるが、優先度は最低にする
+                                    candidates.append({
+                                        "title": title, "url": v_url, "id": v_id, 
+                                        "type": "mlb", "source": "@MLBJapan", "priority": 3
                                     })
                     except: continue
         except: continue
@@ -150,6 +166,7 @@ def main():
     flash_model = get_available_flash_model()
     
     print(f"⚾️ 探索開始...")
+    # NPBを最優先でリストアップ
     candidates = get_npb_candidates(history) + get_mlb_candidates(history, is_test_mode)
     
     if not candidates: print("😴 新着なし"); return
@@ -159,13 +176,14 @@ def main():
     mlb_ratio = stats['mlb'] / total_posted if total_posted > 0 else 0
     print(f"📊 現在のMLB比率: {mlb_ratio*100:.1f}% (目標: 25%以下)")
 
-    # 優先度順にソート
+    # 優先度順に並び替え（NPB: 1, MLB日本人: 2, MLBその他: 3）
     candidates.sort(key=lambda x: x['priority'])
     
     for video in candidates[:15]:
-        # MLB比率制限: NPBがあればMLBはスキップ（目標比率に近づける）
-        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25:
-            print(f"🛑 比率制限につきMLBをスキップ: {video['title']}")
+        # MLB比率制限: 比率が25%を超えていて、かつNPBの候補があるならMLBは絶対スキップ
+        has_npb = any(c['type'] == 'npb' for c in candidates)
+        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and has_npb:
+            print(f"🛑 比率調整のためMLBをスキップ: {video['title']}")
             continue
 
         print(f"🎯 ターゲット確定: {video['title']}")
@@ -187,7 +205,7 @@ def main():
                 res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
                 if res.get('status') == 'success':
                     public_url = res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                    print(f"✅ 公開URL確保: {public_url}")
+                    print(f"✅ 公開準備完了: {public_url}")
                     time.sleep(10)
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                     
@@ -197,6 +215,7 @@ def main():
                             time.sleep(30)
                             status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
                             status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                            print(f"  ステータス: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 print(f"🏁 投稿完了！: {video['title']}")
