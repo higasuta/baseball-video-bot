@@ -26,12 +26,13 @@ if GEMINI_API_KEY:
 # 日本人選手キーワード
 JPN_KEYWORDS = ["大谷", "山本", "ダルビッシュ", "鈴木誠也", "吉田正尚", "今永", "松井裕樹", "千賀", "前田健太", "菊池雄星", "ohtani", "yamamoto", "imanaga", "菅野", "senga", "darvish"]
 
-# 【超厳選】地味な「解析動画」を徹底排除
+# 【さらに厳選】地味な「解析動画」と「超重量級まとめ」を徹底排除
 BLACK_KEYWORDS = [
     "probable", "pitchers", "lineup", "interview", "press", "availability", 
     "roster", "update", "alignment", "summary", "preview", "warmup", 
     "positioning", "against", "at bat", "statcast", "recap", "daily",
-    "measuring", "animated", "distance", "deep dive", "analyzing", "data viz"
+    "measuring", "animated", "distance", "deep dive", "analyzing", "data viz",
+    "condensed" # 300MB超えを避ける
 ]
 
 def get_stats():
@@ -69,7 +70,6 @@ def get_all_candidates(history, is_test_mode):
                 v_url = item.find('link').text
                 v_id = item.find('guid').text if item.find('guid') is not None else v_url
                 if v_id not in history and not any(kw in title.lower() for kw in BLACK_KEYWORDS):
-                    # NPBは無条件で高優先
                     candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "スポーツナビ", "priority": 1})
     except: pass
 
@@ -87,49 +87,55 @@ def get_all_candidates(history, is_test_mode):
                     for item in highlights:
                         title = item.get('headline', '')
                         v_id = str(item.get('id'))
-                        v_url = next((p['url'] for p in item.get('playbacks', []) if p['name'] == 'mp4Avc'), None)
-                        if v_url and v_id not in history:
+                        video_url = next((p['url'] for p in item.get('playbacks', []) if p['name'] == 'mp4Avc'), None)
+                        if video_url and v_id not in history:
                             if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
                             
                             is_jpn = any(kw in title.lower() for kw in JPN_KEYWORDS)
-                            is_hr = "home run" in title.lower()
-                            
-                            if is_jpn: # 日本人選手は最優先
-                                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 1})
-                            elif is_hr or is_test_mode: # 本塁打などは次点
-                                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2})
+                            if is_jpn: 
+                                candidates.append({"title": title, "url": video_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 1})
+                            elif is_test_mode and "home run" in title.lower():
+                                candidates.append({"title": title, "url": video_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2})
         except: continue
     
-    # 優先度順に並び替え
     candidates.sort(key=lambda x: x['priority'])
     return candidates
 
 def analyze_video_with_ai(video_path, title, source_account):
-    print(f"🧠 AI解析中 (Gemini)...")
+    """Geminiによる解析（モデル名リトライ機能付き）"""
+    print(f"🧠 AIによる動画解析中...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         
-        # 【修正】404エラーを回避する確実なモデル名
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        
-        prompt = f"""
-        野球動画({title})を解析し、以下の形式で出力せよ。
-        プレー映像がない場合は CAPTION:SKIP と出力せよ。
-        START:[秒]
-        CAPTION:[内容]
-        構成：一段目【 】入りの鋭い見出し。二段目要約。三段目皮肉のきいた鋭い所感。
-        ネットスラング禁止。だ・である調。タグ25〜29個。引用：{source_account}
-        """
-        response = model.generate_content([prompt, video_file])
-        res_text = response.text
-        genai.delete_file(video_file.name)
-        
-        if "SKIP" in res_text: return None, "SKIP"
-        start_match = re.search(r"START:(\d+)", res_text); start_sec = int(start_match.group(1)) if start_match else 0
-        caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL); ai_caption = caption_match.group(1).strip() if caption_match else None
-        print(f"  ✨ AI解析成功: 開始 {start_sec}s")
-        return start_sec, ai_caption
+        # モデル名を順番に試す（404回避）
+        for model_id in ["gemini-1.5-flash-latest", "gemini-1.5-flash"]:
+            try:
+                print(f"  👉 モデル試行中: {model_id}")
+                model = genai.GenerativeModel(model_id)
+                prompt = f"""
+                野球動画({title})を解析し、以下の形式で出力せよ。
+                START:[秒]
+                CAPTION:[内容]
+                構成：一段目【 】入りの鋭い見出し。二段目要約。三段目皮肉のきいた鋭い所感。
+                ネットスラング禁止。だ・である調。タグ25〜29個。引用：{source_account}
+                """
+                response = model.generate_content([prompt, video_file])
+                res_text = response.text
+                genai.delete_file(video_file.name)
+                
+                start_match = re.search(r"START:(\d+)", res_text)
+                start_sec = int(start_match.group(1)) if start_match else 0
+                caption_match = re.search(r"CAPTION:(.*)", res_text, re.DOTALL)
+                ai_caption = caption_match.group(1).strip() if caption_match else None
+                
+                print(f"  ✨ AI解析成功 ({model_id}): 開始 {start_sec}s")
+                return start_sec, ai_caption
+            except Exception as inner_e:
+                if "404" in str(inner_e): continue
+                else: raise inner_e
+                
+        return None, None
     except Exception as e:
         print(f"  ⚠️ AI解析失敗: {e}")
         return None, None
@@ -143,13 +149,11 @@ def main():
     cleanup_gemini_storage()
     print("⚾️ 探索開始...")
     candidates = get_all_candidates(history, is_test_mode)
-    
     if not candidates: print("😴 新着なし"); return
 
     total_posted = stats['npb'] + stats['mlb']
     mlb_ratio = stats['mlb'] / total_posted if total_posted > 0 else 0
 
-    # 精鋭候補を最大10本チェック
     for video in candidates[:10]:
         if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.4: continue
 
@@ -160,8 +164,9 @@ def main():
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000: continue
 
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video['title'], video['source'])
-        if ai_caption == "SKIP" or ai_caption is None:
-            with open(history_file, 'a') as fh: fh.write(video['id'] + "\n"); continue
+        if ai_caption is None:
+            # 解析失敗したものは履歴には入れず、次回の実行に期待する（IDは書かない）
+            continue
 
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
@@ -178,11 +183,11 @@ def main():
                     
                     if 'id' in post_res:
                         creation_id = post_res['id']
-                        print(f"⏳ 処理待機 (ID: {creation_id})...")
                         for _ in range(20):
                             time.sleep(30)
                             status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
                             status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                            print(f"  ステータス: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 print(f"🏁 投稿完了！: {video['title']}")
