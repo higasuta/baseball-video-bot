@@ -2,8 +2,8 @@ name: Baseball Video Bot
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # 15分おきに自動実行
-  workflow_dispatch:      # ← これが「ボタン」を出す命令です
+    - cron: '*/10 * * * *'  # 15分から10分おきに変更（投稿頻度3割増設定）
+  workflow_dispatch:      # 手動実行ボタン
     inputs:
       test_mode:
         description: 'Set to true for testing'
@@ -14,7 +14,7 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write    # history.txtとstats.jsonを保存するために必要
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -U yt-dlp
-          pip install -r requirements.txt
+          pip install requests google-generativeai
 
       - name: Run bot
         env:
@@ -39,13 +39,13 @@ jobs:
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TEST_MODE: ${{ github.event.inputs.test_mode }}
-        # python -u を使うことで、ログが溜まらずにすぐ表示されるようになります
+        # -u を付けることでログが溜まらずにリアルタイムで表示されます
         run: python -u main.py
 
-      - name: Commit changes
+      - name: Commit and Push changes
         run: |
-          git config --global user.name "actions-user"
-          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add history.txt stats.json
-          git commit -m "Update post history and stats [skip ci]" || echo "No changes to commit"
+          git commit -m "Update history and stats [skip ci]" || echo "No changes to commit"
           git push
