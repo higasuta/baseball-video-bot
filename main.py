@@ -1,6 +1,6 @@
 import sys
-# リアルタイムログ出力
-print("🚀 プレイボール速報・システム最終形態 起動...")
+# リアルタイムログ出力設定
+print("🚀 プレイボール速報・システム稼働開始...")
 sys.stdout.flush()
 
 import requests
@@ -25,38 +25,24 @@ if GEMINI_API_KEY:
 
 # 【完全網羅】日本人選手キーワード（1人4パターン × 15名 = 60キーワード）
 JPN_KEYWORDS = [
-    # ドジャース
     "大谷翔平", "大谷", "shohei ohtani", "ohtani",
     "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto",
     "佐々木朗希", "佐々木", "roki sasaki", "sasaki",
-    # パドレス
     "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish",
     "松井裕樹", "松井", "yuki matsui", "matsui",
-    # カブス
     "鈴木誠也", "鈴木", "seiya suzuki", "suzuki",
     "今永昇太", "今永", "shota imanaga", "imanaga",
-    # メッツ
     "千賀滉大", "千賀", "kodai senga", "senga",
-    # ロッキーズ
     "菅野智之", "菅野", "tomoyuki sugano", "sugano",
-    # ナショナルズ
     "小笠原慎之介", "小笠原", "shinnosuke ogasawara", "ogasawara",
-    # ブルージェイズ
     "岡本和真", "岡本", "kazuma okamoto", "okamoto",
-    # アストロズ
     "今井達也", "今井", "tatsuya imai", "imai",
-    # レッドソックス
     "吉田正尚", "吉田", "masataka yoshida", "yoshida",
-    # エンゼルス
     "菊池雄星", "菊池", "yusei kikuchi", "kikuchi",
-    # ホワイトソックス
     "村上宗隆", "村上", "munetaka murakami", "murakami"
 ]
 
-# 特報キーワード（比率を無視して投稿する条件）
-HOT_KEYWORDS = ["home run", "hr", "grand slam", "stole", "stolen base", "steal", "record", "historic", "milestone", "perfect game", "no-hitter"]
-
-# 排除キーワード
+# 排除キーワード（地味な動画・データ動画を徹底排除）
 BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights"]
 
 def get_stats():
@@ -74,7 +60,7 @@ def cleanup_gemini_storage():
     try:
         for f in genai.list_files():
             genai.delete_file(f.name)
-        print("🧹 AIストレージの掃除完了。")
+        print("🧹 AIストレージを掃除しました。")
     except: pass
 
 def get_available_flash_model():
@@ -87,37 +73,37 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def get_npb_candidates(history):
+    """NPB動画を探索（解析精度を極限まで強化）"""
     candidates = []
-    # ルートA: パ・リーグTV
-    try:
-        url = "https://pacificleague.com/video"
-        cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--playlist-end', '5', '--no-check-certificates', '--quiet', url]
-        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=40).decode().split('\n')
-        for i in range(0, len(output)-2, 3):
-            title, v_id, v_url = output[i].strip(), output[i+1].strip(), output[i+2].strip()
-            if v_id and v_id not in history:
-                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "パ・リーグTV", "priority": 1, "is_hot": False})
-    except: pass
-
-    # ルートB: スポーツナビ
+    # ルートB: スポーツナビをメインに据える（requestsベースで安定）
+    print("🔍 NPB探索中 (スポーツナビ解析)...")
     try:
         url = "https://sports.yahoo.co.jp/video/list/promo/live/baseball/npb"
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        matches = re.findall(r'href="/video/player/(\d+)"', res.text)
-        unique_ids = list(dict.fromkeys(matches))[:5]
-        for v_id in unique_ids:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        res = requests.get(url, headers=headers, timeout=20)
+        
+        # ID、リンク、タイトルの三位一体抽出
+        items = re.findall(r'href="/video/player/(\d+)".*?><h3[^>]*?>(.*?)</h3>', res.text, re.DOTALL)
+        unique_items = []
+        seen_ids = set()
+        for v_id, title in items:
+            if v_id not in seen_ids:
+                unique_items.append((v_id, title.strip()))
+                seen_ids.add(v_id)
+
+        for v_id, title in unique_items:
             if v_id not in history:
-                v_url = f"https://sports.yahoo.co.jp/video/player/{v_id}"
-                v_res = requests.get(v_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-                t_match = re.search(r'<title>(.*?)</title>', v_res.text)
-                title = t_match.group(1).split('-')[0].strip() if t_match else "NPBハイライト"
-                if not any(kw in title.lower() for kw in BLACK_KEYWORDS):
-                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "スポーツナビ", "priority": 1, "is_hot": False})
-    except: pass
+                if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
+                print(f"  ✅ NPB候補発見: {title}")
+                candidates.append({
+                    "title": title, "url": f"https://sports.yahoo.co.jp/video/player/{v_id}", 
+                    "id": v_id, "type": "npb", "source": "スポーツナビ", "priority": 1
+                })
+    except Exception as e: print(f"  ⚠️ ルートB失敗: {e}")
     return candidates
 
 def get_mlb_candidates(history, is_test_mode):
-    print("🔍 MLB動画を探索中（日本人選手限定）...")
+    print("🔍 MLB動画を探索中（日本人選手完全網羅）...")
     candidates = []
     for day_offset in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -135,18 +121,17 @@ def get_mlb_candidates(history, is_test_mode):
                             v_id = str(item.get('id'))
                             v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                             if v_url and v_id not in history:
-                                is_jpn = any(kw in title.lower() for kw in JPN_KEYWORDS)
-                                is_hot = any(kw in title.lower() for kw in HOT_KEYWORDS)
-                                if is_jpn:
-                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2, "is_hot": is_hot})
-                                elif is_test_mode and is_hot:
-                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 3, "is_hot": is_hot})
+                                if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
+                                # 全員網羅したJPN_KEYWORDSでチェック
+                                if any(kw in title.lower() for kw in JPN_KEYWORDS):
+                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2})
                     except: continue
         except: continue
     return candidates
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
-    print(f"🧠 AIによる動画解析中...")
+    """Botラベルを排除した自然なキャプションを生成"""
+    print(f"🧠 AI解析中 (モデル: {model_name})...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
@@ -155,35 +140,39 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         prompt = f"""
         野球動画({title})を解析し、以下の2つを必ず出力せよ。
 
-        [秒数(数値1つ)]
+        [秒数のみ]
         [本文]
 
-        【キャプション執筆ルール】
-        ・あなたは野球の「2chまとめ解説動画」の、少し毒舌だが愛のあるナレーターだ。
-        ・一段目：【 】で囲った鋭い見出し。
+        【ルール】
+        ・一段目：【 】付きの鋭い見出し（皮肉や分析を交える）。
         ・二段目：ニュースの核心。
         ・三段目：アナリスト視点の鋭い所感。
-        ・四段目：[0:05] 〇〇の瞬間、のようにタイムスタンプを自然に添えろ。
-        ・「です・ます」禁止。標準語の「だ・である」調。
-        ・ラベル（START:等）は絶対に書くな。
+        ・四段目：[0:12] のような自然なタイムスタンプ。
+        ・「です・ます」禁止。標準語の「だ・である」調を徹底。
+        ・ラベル（START:、CAPTION:、秒数: 等）は絶対に出力するな。
         ・ハッシュタグは合計25〜30個。中黒「・」は禁止。
-        引用：{source_account}
+        引用：{source_account} は最後に1回だけ記載。
         """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
 
-        lines = [l.strip() for l in res_text.split('\n') if l.strip()]
-        start_sec = 0
+        # ラベル文字（START等）が混入していたら物理的に削除
+        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始)[:：]\s*', '', res_text).strip()
+
+        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+        if not lines: return 0, None
+        
+        # 最初の行に数字が含まれていればそれを秒数に
         first_line_match = re.search(r"(\d+)", lines[0])
         if first_line_match:
             start_sec = int(first_line_match.group(1))
             ai_caption = "\n".join(lines[1:])
         else:
+            start_sec = 0
             ai_caption = "\n".join(lines)
-        
-        # 不要なラベルを最終除去
-        ai_caption = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始)[:：]\s*', '', ai_caption).strip()
+
+        print(f"  ✨ 解析成功: 開始 {start_sec}s")
         return start_sec, ai_caption
     except: return None, None
 
@@ -209,9 +198,8 @@ def main():
 
     candidates.sort(key=lambda x: x['priority'])
     
-    for video in candidates[:10]:
-        # MLB比率制限: 比率25%超 & NPBあり & Hot判定なし ならスキップ
-        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_candidates) > 0 and not video['is_hot']:
+    for video in candidates[:15]:
+        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_candidates) > 0:
             continue
 
         print(f"🎯 ターゲット確定: {video['title']}")
