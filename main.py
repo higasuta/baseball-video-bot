@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力
-print("🚀 プレイボール速報・システム最終形態（日本人メジャーリーガー完全網羅版）起動...")
+print("🚀 プレイボール速報・システム最終形態 起動...")
 sys.stdout.flush()
 
 import requests
@@ -11,6 +11,7 @@ import subprocess
 import google.generativeai as genai
 import json
 import re
+import xml.etree.ElementTree as ET
 
 # ==========================================
 # 設定・環境変数の読み込み
@@ -52,6 +53,9 @@ JPN_KEYWORDS = [
     "村上宗隆", "村上", "munetaka murakami", "murakami"
 ]
 
+# 特報キーワード（比率を無視して投稿する条件）
+HOT_KEYWORDS = ["home run", "hr", "grand slam", "stole", "stolen base", "steal", "record", "historic", "milestone", "perfect game", "no-hitter"]
+
 # 排除キーワード
 BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights"]
 
@@ -70,7 +74,7 @@ def cleanup_gemini_storage():
     try:
         for f in genai.list_files():
             genai.delete_file(f.name)
-        print("🧹 AIストレージを掃除しました。")
+        print("🧹 AIストレージの掃除完了。")
     except: pass
 
 def get_available_flash_model():
@@ -92,7 +96,7 @@ def get_npb_candidates(history):
         for i in range(0, len(output)-2, 3):
             title, v_id, v_url = output[i].strip(), output[i+1].strip(), output[i+2].strip()
             if v_id and v_id not in history:
-                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "パ・リーグTV", "priority": 1})
+                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "パ・リーグTV", "priority": 1, "is_hot": False})
     except: pass
 
     # ルートB: スポーツナビ
@@ -106,4 +110,146 @@ def get_npb_candidates(history):
                 v_url = f"https://sports.yahoo.co.jp/video/player/{v_id}"
                 v_res = requests.get(v_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
                 t_match = re.search(r'<title>(.*?)</title>', v_res.text)
-                title = t_match.group(1).split('-
+                title = t_match.group(1).split('-')[0].strip() if t_match else "NPBハイライト"
+                if not any(kw in title.lower() for kw in BLACK_KEYWORDS):
+                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "スポーツナビ", "priority": 1, "is_hot": False})
+    except: pass
+    return candidates
+
+def get_mlb_candidates(history, is_test_mode):
+    print("🔍 MLB動画を探索中（日本人選手限定）...")
+    candidates = []
+    for day_offset in [0, 1]:
+        date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
+        url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
+        try:
+            res = requests.get(url, timeout=15).json()
+            if 'dates' not in res: continue
+            for date_data in res['dates']:
+                for game in date_data.get('games', []):
+                    try:
+                        content = requests.get(f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content").json()
+                        highlights = content.get('highlights', {}).get('highlights', {}).get('items', [])
+                        for item in highlights:
+                            title = item.get('headline', '')
+                            v_id = str(item.get('id'))
+                            v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
+                            if v_url and v_id not in history:
+                                is_jpn = any(kw in title.lower() for kw in JPN_KEYWORDS)
+                                is_hot = any(kw in title.lower() for kw in HOT_KEYWORDS)
+                                if is_jpn:
+                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2, "is_hot": is_hot})
+                                elif is_test_mode and is_hot:
+                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 3, "is_hot": is_hot})
+                    except: continue
+        except: continue
+    return candidates
+
+def analyze_video_with_ai(video_path, title, source_account, model_name):
+    print(f"🧠 AIによる動画解析中...")
+    try:
+        video_file = genai.upload_file(path=video_path)
+        while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
+        model = genai.GenerativeModel(model_name)
+        
+        prompt = f"""
+        野球動画({title})を解析し、以下の2つを必ず出力せよ。
+
+        [秒数(数値1つ)]
+        [本文]
+
+        【キャプション執筆ルール】
+        ・あなたは野球の「2chまとめ解説動画」の、少し毒舌だが愛のあるナレーターだ。
+        ・一段目：【 】で囲った鋭い見出し。
+        ・二段目：ニュースの核心。
+        ・三段目：アナリスト視点の鋭い所感。
+        ・四段目：[0:05] 〇〇の瞬間、のようにタイムスタンプを自然に添えろ。
+        ・「です・ます」禁止。標準語の「だ・である」調。
+        ・ラベル（START:等）は絶対に書くな。
+        ・ハッシュタグは合計25〜30個。中黒「・」は禁止。
+        引用：{source_account}
+        """
+        response = model.generate_content([prompt, video_file])
+        res_text = response.text
+        genai.delete_file(video_file.name)
+
+        lines = [l.strip() for l in res_text.split('\n') if l.strip()]
+        start_sec = 0
+        first_line_match = re.search(r"(\d+)", lines[0])
+        if first_line_match:
+            start_sec = int(first_line_match.group(1))
+            ai_caption = "\n".join(lines[1:])
+        else:
+            ai_caption = "\n".join(lines)
+        
+        # 不要なラベルを最終除去
+        ai_caption = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始)[:：]\s*', '', ai_caption).strip()
+        return start_sec, ai_caption
+    except: return None, None
+
+def main():
+    is_test_mode = os.getenv('TEST_MODE') == 'true'
+    stats = get_stats(); history_file = "history.txt"
+    if not os.path.exists(history_file): open(history_file, 'w').close()
+    with open(history_file, 'r') as f: history = f.read().splitlines()
+
+    cleanup_gemini_storage()
+    flash_model = get_available_flash_model()
+    
+    print(f"⚾️ 探索開始...")
+    npb_candidates = get_npb_candidates(history)
+    mlb_candidates = get_mlb_candidates(history, is_test_mode)
+    candidates = npb_candidates + mlb_candidates
+    
+    if not candidates: print("😴 新着なし"); return
+
+    total_posted = stats['npb'] + stats['mlb']
+    mlb_ratio = stats['mlb'] / total_posted if total_posted > 0 else 0
+    print(f"📊 現在のMLB比率: {mlb_ratio*100:.1f}%")
+
+    candidates.sort(key=lambda x: x['priority'])
+    
+    for video in candidates[:10]:
+        # MLB比率制限: 比率25%超 & NPBあり & Hot判定なし ならスキップ
+        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_candidates) > 0 and not video['is_hot']:
+            continue
+
+        print(f"🎯 ターゲット確定: {video['title']}")
+        temp_input = "temp_video.mp4"
+        subprocess.run(['curl', '-L', video['url'], '-o', temp_input])
+        if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000: continue
+
+        start_sec, ai_caption = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
+        if ai_caption is None:
+            with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
+            continue
+
+        output_file = "output.mp4"
+        filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
+        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
+        
+        try:
+            with open(output_file, 'rb') as f:
+                res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
+                if res.get('status') == 'success':
+                    public_url = res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                    print(f"✅ 公開URL確保")
+                    time.sleep(10)
+                    post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
+                    
+                    if 'id' in post_res:
+                        creation_id = post_res['id']
+                        for _ in range(20):
+                            time.sleep(30)
+                            status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
+                            status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                            if status == 'FINISHED':
+                                requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
+                                print(f"🏁 投稿完了！")
+                                with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
+                                stats[video['type']] += 1; save_stats(stats); return
+        except Exception as e: print(f"  ❌ エラー: {e}")
+    print("😴 終了。")
+
+if __name__ == "__main__":
+    main()
