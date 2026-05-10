@@ -1,6 +1,6 @@
 import sys
-# リアルタイムログ出力設定
-print("🚀 プレイボール速報・新章（メディアサイト巡回 ＋ ラベル抹殺モード）起動...")
+# リアルタイムログ出力
+print("🚀 プレイボール速報・システム稼働（NPB執念のスキャン ＋ Git衝突回避モード）...")
 sys.stdout.flush()
 
 import requests
@@ -22,7 +22,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# 【完全網羅】日本人選手キーワード（15名 × 4パターン = 60個）
+# 【完全網羅】日本人選手キーワード（15名）
 JPN_KEYWORDS = [
     "大谷翔平", "大谷", "shohei ohtani", "ohtani",
     "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto",
@@ -51,7 +51,6 @@ def get_stats():
     return {"npb": 75, "mlb": 25}
 
 def save_stats(stats):
-    # 'get_stats'エラーを完全に修正
     with open('stats.json', 'w') as f:
         json.dump(stats, f)
 
@@ -72,42 +71,57 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def get_npb_video(history):
-    """メディアサイトからNPB動画を探索（YouTube/X不使用ルート）"""
+    """NPB動画を4つのルートで探索"""
     candidates = []
-    # 日本人ユーザーを装うヘッダー
-    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"}
+    ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+    headers = {"User-Agent": ua}
 
-    # ルート1: ベースボールキング (ニュースサイト)
+    # ルートA: ベースボールキング
     print("🔍 NPBルートA (ベースボールキング) 探索中...")
     try:
-        url = "https://baseballking.jp/video"
-        res = requests.get(url, headers=headers, timeout=20)
-        # IDとタイトルを抽出
-        items = re.findall(r'href="https://baseballking.jp/npb/(\d+)"[^>]*?>(.*?)</a>', res.text)
-        for v_id, title in items:
+        res = requests.get("https://baseballking.jp/video", headers=headers, timeout=15)
+        items = re.findall(r'href="(https://baseballking.jp/npb/\d+)"[^>]*?>(.*?)</a>', res.text)
+        for url, title in items:
+            v_id = url.split('/')[-1]
             if v_id not in history:
-                candidates.append({"title": title.strip(), "url": f"https://baseballking.jp/npb/{v_id}", "id": v_id, "type": "npb", "source": "ベースボールキング", "priority": 1})
+                candidates.append({"title": title.strip(), "url": url, "id": v_id, "type": "npb", "source": "ベースボールキング", "priority": 1})
     except: pass
 
-    # ルート2: スポーツナビ (モバイル版擬態)
+    # ルートB: スポーツナビ
     print("🔍 NPBルートB (スポナビ) 探索中...")
     try:
-        url = "https://sports.yahoo.co.jp/video/list/promo/live/baseball/npb"
-        res = requests.get(url, headers=headers, timeout=20)
+        res = requests.get("https://sports.yahoo.co.jp/video/list/promo/live/baseball/npb", headers=headers, timeout=15)
         matches = re.findall(r'href="/video/player/(\d+)"', res.text)
         for v_id in list(dict.fromkeys(matches))[:5]:
             if v_id not in history:
-                v_url = f"https://sports.yahoo.co.jp/video/player/{v_id}"
-                v_res = requests.get(v_url, headers=headers, timeout=10)
-                t_match = re.search(r'<title>(.*?)</title>', v_res.text)
-                title = t_match.group(1).split('-')[0].strip() if t_match else "NPBハイライト"
-                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "スポーツナビ", "priority": 1})
+                candidates.append({"title": "NPB名シーン", "url": f"https://sports.yahoo.co.jp/video/player/{v_id}", "id": v_id, "type": "npb", "source": "スポーツナビ", "priority": 1})
+    except: pass
+
+    # ルートC: テレビ東京スポーツ
+    print("🔍 NPBルートC (テレ東) 探索中...")
+    try:
+        res = requests.get("https://www.tv-tokyo.co.jp/sports/baseball/", headers=headers, timeout=15)
+        v_ids = re.findall(r'/sports/video/(\d+)', res.text)
+        for v_id in list(dict.fromkeys(v_ids))[:5]:
+            if v_id not in history:
+                candidates.append({"title": "NPBハイライト", "url": f"https://www.tv-tokyo.co.jp/sports/video/{v_id}", "id": v_id, "type": "npb", "source": "テレビ東京", "priority": 1})
+    except: pass
+
+    # ルートD: 日テレNEWS野球
+    print("🔍 NPBルートD (日テレNEWS) 探索中...")
+    try:
+        res = requests.get("https://news.ntv.co.jp/category/sports", headers=headers, timeout=15)
+        matches = re.findall(r'href="/articles/([a-z0-9]+)"[^>]*?>(.*?)</a>', res.text)
+        for v_id, title in matches:
+            if "野球" in title or "巨" in title or "阪神" in title:
+                if v_id not in history:
+                    candidates.append({"title": title.strip(), "url": f"https://news.ntv.co.jp/articles/{v_id}", "id": v_id, "type": "npb", "source": "日テレNEWS", "priority": 1})
     except: pass
 
     return candidates
 
 def get_mlb_video(history, is_test_mode):
-    print("🔍 MLB動画を探索中（日本人15名限定）...")
+    print("🔍 MLB動画を探索中...")
     candidates = []
     for day_offset in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -138,25 +152,17 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         model = genai.GenerativeModel(model_name)
         prompt = f"""
-        野球動画({title})を解析し、以下の2つを必ず出力せよ。
+        野球動画({title})を解析し、以下の2つを出力せよ。
         [開始秒数(数値のみ)を1行目に]
         [本文を2行目以降に]
-
         【ルール】
-        ・一段目：【 】付きの鋭い見出し。
-        ・二段目：ニュースの核心。
-        ・三段目：アナリスト視点の鋭い所感（だ・である調）。
-        ・四段目：[0:05] 〇〇の瞬間、のようにタイムスタンプを自然に。
-        ・START: や CAPTION: などのラベル、ネットスラングは禁止。
-        ・ハッシュタグは合計25個。引用：{source_account} を最後に1回。
+        ・一段目：【 】付きの鋭い見出し。二段目：要約。三段目：アナリスト視点の所感。四段目：[0:05] 〇〇の瞬間、のようにタイムスタンプ。
+        ・ラベル(START:等)、スラングは禁止。だ・である調。ハッシュタグ25個。引用：{source_account} を最後に。
         """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
-        
-        # 【物理抹殺】ラベル文字(START等)を正規表現で強制削除
         clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感)[:：]\s*', '', res_text).strip()
-        
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         start_sec = 0
         first_line_match = re.search(r"(\d+)", lines[0]) if lines else None
@@ -191,19 +197,16 @@ def main():
     candidates.sort(key=lambda x: x.get('priority', 2))
     
     for video in candidates:
-        # MLB比率調整
         if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_list) > 0:
             continue
 
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
-        # 全て yt-dlp で統一、iPhone偽装で検閲突破
         ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
         cmd = ['yt-dlp', '-o', temp_input, '--user-agent', ua, '--no-check-certificates', '--quiet', video['url']]
         res = subprocess.run(cmd)
         
         if res.returncode != 0 or not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
-            print(f"  ❌ ダウンロード失敗: 次の候補を試します。")
             continue
 
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
@@ -216,9 +219,9 @@ def main():
         
         try:
             with open(output_file, 'rb') as f:
-                res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
-                if res.get('status') == 'success':
-                    public_url = res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
+                if up_res.status_code == 200: # 修正: up_res は辞書なのでステータスチェック方法を修正
+                    public_url = up_res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
                     print(f"✅ 公開URL確保")
                     time.sleep(10)
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
