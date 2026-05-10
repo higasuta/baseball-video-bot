@@ -2,8 +2,8 @@ name: Baseball Video Bot
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # 15分から10分おきに変更（投稿頻度3割増設定）
-  workflow_dispatch:      # 手動実行ボタン
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
     inputs:
       test_mode:
         description: 'Set to true for testing'
@@ -14,10 +14,12 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write    # history.txtとstats.jsonを保存するために必要
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 履歴をすべて取得して衝突を防ぐ
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -39,7 +41,6 @@ jobs:
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TEST_MODE: ${{ github.event.inputs.test_mode }}
-        # -u を付けることでログが溜まらずにリアルタイムで表示されます
         run: python -u main.py
 
       - name: Commit and Push changes
@@ -48,4 +49,6 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add history.txt stats.json
           git commit -m "Update history and stats [skip ci]" || echo "No changes to commit"
-          git push
+          # pushの前に最新状態を取り込んで衝突を回避する
+          git pull --rebase origin main
+          git push origin main
