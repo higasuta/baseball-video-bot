@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力設定
-print("🚀 プレイボール速報・システム稼働（嘘を許さない徹底ログ ＋ バグ修正版）...")
+print("🚀 プレイボール速報・システム稼働（最終安定化モデル）...")
 sys.stdout.flush()
 
 import requests
@@ -11,6 +11,7 @@ import subprocess
 import google.generativeai as genai
 import json
 import re
+import xml.etree.ElementTree as ET
 
 # ==========================================
 # 設定・環境変数の読み込み
@@ -22,22 +23,15 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# 【完全網羅】日本人選手キーワード
+# 日本人選手キーワード（15名完全網羅）
 JPN_KEYWORDS = [
-    "大谷翔平", "大谷", "shohei ohtani", "ohtani",
-    "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto",
-    "佐々木朗希", "佐々木", "roki sasaki", "sasaki",
-    "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish",
-    "松井裕樹", "松井", "yuki matsui", "matsui",
-    "鈴木誠也", "鈴木", "seiya suzuki", "suzuki",
-    "今永昇太", "今永", "shota imanaga", "imanaga",
-    "千賀滉大", "千賀", "kodai senga", "senga",
-    "菅野智之", "菅野", "tomoyuki sugano", "sugano",
-    "小笠原慎之介", "小笠原", "shinnosuke ogasawara", "ogasawara",
-    "岡本和真", "岡本", "kazuma okamoto", "okamoto",
-    "今井達也", "今井", "tatsuya imai", "imai",
-    "吉田正尚", "吉田", "masataka yoshida", "yoshida",
-    "菊池雄星", "菊池", "yusei kikuchi", "kikuchi",
+    "大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto",
+    "佐々木朗希", "佐々木", "roki sasaki", "sasaki", "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish",
+    "松井裕樹", "松井", "yuki matsui", "matsui", "鈴木誠也", "鈴木", "seiya suzuki", "suzuki",
+    "今永昇太", "今永", "shota imanaga", "imanaga", "千賀滉大", "千賀", "kodai senga", "senga",
+    "菅野智之", "菅野", "tomoyuki sugano", "sugano", "小笠原慎之介", "小笠原", "shinnosuke ogasawara", "ogasawara",
+    "岡本和真", "岡本", "kazuma okamoto", "okamoto", "今井達也", "今井", "tatsuya imai", "imai",
+    "吉田正尚", "吉田", "masataka yoshida", "yoshida", "菊池雄星", "菊池", "yusei kikuchi", "kikuchi",
     "村上宗隆", "村上", "munetaka murakami", "murakami"
 ]
 
@@ -58,58 +52,50 @@ def cleanup_gemini_storage():
     try:
         for f in genai.list_files():
             genai.delete_file(f.name)
-        print("🧹 AIストレージの掃除完了。")
+        print("🧹 AIストレージを掃除しました。")
     except: pass
 
 def get_available_flash_model():
+    """環境で安定して動くFlashモデルを自動検知"""
     try:
         model_names = [m.name for m in genai.list_models() if 'flash' in m.name]
-        priority_models = ["models/gemini-2.0-flash", "models/gemini-flash-lite-latest", "models/gemini-1.5-flash"]
+        # 制限の厳しい2.0より1.5を優先して安定稼働させる
+        priority_models = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-2.0-flash"]
         for pm in priority_models:
             if pm in model_names: return pm
-        return model_names[0]
+        return model_names[0] if model_names else "models/gemini-1.5-flash"
     except: return "models/gemini-1.5-flash"
 
 def get_npb_video(history):
-    """NPB動画を執念深くスキャン"""
+    """YouTube RSSから動画を取得（ブロックされない唯一のNPBルート）"""
     candidates = []
-    ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-    headers = {"User-Agent": ua}
-
-    # 各ルートの探索
-    routes = [
-        {"name": "ベースボールキング", "url": "https://baseballking.jp/video", "regex": r'href="(https://baseballking.jp/npb/\d+)"[^>]*?>(.*?)</a>'},
-        {"name": "スポナビ", "url": "https://sports.yahoo.co.jp/video/list/promo/live/baseball/npb", "regex": r'href="/video/player/(\d+)"'}
+    feeds = [
+        {"name": "パ・リーグTV", "id": "UC0v-pxTo1XamIDE-f__Ad0Q"},
+        {"name": "NPB公式", "id": "UC7vYid8pCUpIOn85X_2f_ig"}
     ]
-
-    for route in routes:
-        print(f"🔍 NPB {route['name']} スキャン中...")
+    for feed in feeds:
+        print(f"🔍 NPB {feed['name']} RSS スキャン中...")
         try:
-            res = requests.get(route['url'], headers=headers, timeout=15)
-            matches = re.findall(route['regex'], res.text, re.DOTALL)
-            print(f"  👉 {len(matches)}件 のリンクを検出しました。")
-            
-            for match in matches:
-                if isinstance(match, tuple):
-                    v_url, title = match[0], match[1].strip()
-                    v_id = v_url.split('/')[-1]
-                else:
-                    v_id = match
-                    v_url = f"https://sports.yahoo.co.jp/video/player/{v_id}"
-                    title = "NPB名シーン" # スポナビ用タイトルは後で補完
-
+            url = f"https://www.youtube.com/feeds/videos.xml?channel_id={feed['id']}"
+            res = requests.get(url, timeout=15)
+            root = ET.fromstring(res.content)
+            ns = {'ns': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
+            for entry in root.findall('ns:entry', ns):
+                v_id = entry.find('yt:videoId', ns).text
+                title = entry.find('ns:title', ns).text
                 if v_id not in history:
-                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": route['name'], "priority": 1})
-                else:
-                    pass # 既読
+                    candidates.append({
+                        "title": title, "url": f"https://www.youtube.com/watch?v={v_id}", 
+                        "id": v_id, "type": "npb", "source": f"YouTube {feed['name']}", "priority": 1
+                    })
         except: pass
-    
+    print(f"  👉 NPB候補: {len(candidates)}件")
     return candidates
 
 def get_mlb_video(history, is_test_mode):
-    print("🔍 MLB動画をスキャン中（過去4日間に拡大）...")
+    print("🔍 MLB動画をスキャン中（過去4日間）...")
     candidates = []
-    for day_offset in range(4): # 4日間に拡大
+    for day_offset in range(4):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
@@ -129,7 +115,7 @@ def get_mlb_video(history, is_test_mode):
                                     candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2})
                     except: continue
         except: continue
-    print(f"  👉 MLB候補: {len(candidates)}件（未投稿のみ）")
+    print(f"  👉 MLB候補: {len(candidates)}件")
     return candidates
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
@@ -140,14 +126,22 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         model = genai.GenerativeModel(model_name)
         prompt = f"""
         野球動画({title})を解析し、以下の2つを出力せよ。
-        [開始秒数のみ]
+        [開始秒数(数値のみ)]
         [本文]
-        構成：一段目【 】付きの鋭い見出し。二段目：要約。三段目：アナリスト視点の鋭い所感。四段目：[0:05] 自然なタイムスタンプ。
-        ネットスラング、START:等のラベルは禁止。だ・である調。タグ25個。引用：{source_account}
+        【ルール】
+        ・一段目：【 】付きの鋭い見出し。
+        ・二段目：ニュースの核心。
+        ・三段目：アナリスト視点の鋭い所感（だ・である調）。
+        ・四段目：[0:05] 自然なタイムスタンプ。
+        ・「START:」等のラベル、ネットスラングは禁止。
+        ・ハッシュタグ25個以上（中黒「・」禁止）。
+        引用：{source_account}
         """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
+        
+        # ラベル除去ロジック
         clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感)[:：]\s*', '', res_text).strip()
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         start_sec = 0
@@ -158,7 +152,9 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         else:
             ai_caption = "\n".join(lines)
         return start_sec, ai_caption
-    except: return None, None
+    except Exception as e:
+        print(f"  ⚠️ AIエラー: {e}")
+        return None, None
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
@@ -170,36 +166,39 @@ def main():
     flash_model = get_available_flash_model()
     
     print(f"⚾️ 探索開始...")
-    npb_list = get_npb_video(history)
-    mlb_list = get_mlb_video(history, is_test_mode)
-    candidates = npb_list + mlb_list
+    candidates = get_npb_video(history) + get_mlb_video(history, is_test_mode)
     
-    if not candidates:
-        print("😴 本当に新着がありません。")
-        print(f"💡 デバッグ情報: 履歴数 {len(history)}件。")
-        return
+    if not candidates: print("😴 新着なし"); return
 
     total_posted = stats['npb'] + stats['mlb']
     mlb_ratio = stats['mlb'] / total_posted if total_posted > 0 else 0
-    print(f"📊 比率チェック: MLB {mlb_ratio*100:.1f}%")
+    print(f"📊 MLB比率: {mlb_ratio*100:.1f}%")
 
     candidates.sort(key=lambda x: x.get('priority', 2))
     
     for video in candidates:
-        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_list) > 0:
+        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and any(c['type'] == 'npb' for c in candidates):
             continue
 
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
-        cmd = ['yt-dlp', '-o', temp_input, '--no-check-certificates', '--quiet', video['url']]
-        res = subprocess.run(cmd)
         
-        if res.returncode != 0 or not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
+        # ダウンロード: MLBならcurl、YouTubeならyt-dlp (android偽装)
+        if "YouTube" in video['source']:
+            cmd = ['yt-dlp', '-o', temp_input, '--extractor-args', 'youtube:player_client=android', '--no-check-certificates', '--quiet', video['url']]
+        else:
+            cmd = ['curl', '-L', video['url'], '-o', temp_input]
+            
+        subprocess.run(cmd)
+        
+        if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
+            print("  ❌ ダウンロード失敗: 次の候補を試します。")
             continue
 
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
         if ai_caption is None:
-            with open(history_file, 'a') as fh: fh.write(video['id'] + "\n"); continue
+            # 解析失敗したものは履歴には入れず、次回の実行に期待する
+            continue
 
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
@@ -207,11 +206,9 @@ def main():
         
         try:
             with open(output_file, 'rb') as f:
-                # ★バグ修正：response.json()を呼ぶ前にstatus_codeを確認
                 up_res_raw = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60)
                 if up_res_raw.status_code == 200:
-                    up_res = up_res_raw.json()
-                    public_url = up_res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                    public_url = up_res_raw.json()['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
                     print(f"✅ 公開URL確保")
                     time.sleep(10)
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
@@ -222,6 +219,7 @@ def main():
                             time.sleep(30)
                             status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
                             status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                            print(f"  ステータス: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 print(f"🏁 投稿完了！")
