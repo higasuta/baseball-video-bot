@@ -2,8 +2,8 @@ name: Baseball Video Bot
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # 10分おきに実行
-  workflow_dispatch:      # 手動実行ボタン
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
     inputs:
       test_mode:
         description: 'Set to true for testing'
@@ -25,6 +25,12 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+
+      # ★YouTubeの難読化コード解読のためにNode.jsをインストール
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
