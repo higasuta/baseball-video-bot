@@ -2,8 +2,8 @@ name: Baseball Video Bot
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
-  workflow_dispatch:
+    - cron: '*/10 * * * *'  # 10分おきに実行
+  workflow_dispatch:      # 手動実行ボタン
     inputs:
       test_mode:
         description: 'Set to true for testing'
@@ -41,13 +41,7 @@ jobs:
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TEST_MODE: ${{ github.event.inputs.test_mode }}
-          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
-        run: |
-          # クッキーがあればファイルに書き出す
-          if [ -n "$YOUTUBE_COOKIES" ]; then
-            echo "$YOUTUBE_COOKIES" > youtube_cookies.txt
-          fi
-          python -u main.py
+        run: python -u main.py
 
       - name: Commit and Push changes
         run: |
