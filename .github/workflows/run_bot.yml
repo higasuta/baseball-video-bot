@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 履歴をすべて取得して衝突を防ぐ
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -41,7 +41,13 @@ jobs:
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TEST_MODE: ${{ github.event.inputs.test_mode }}
-        run: python -u main.py
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          # クッキーがあればファイルに書き出す
+          if [ -n "$YOUTUBE_COOKIES" ]; then
+            echo "$YOUTUBE_COOKIES" > youtube_cookies.txt
+          fi
+          python -u main.py
 
       - name: Commit and Push changes
         run: |
@@ -49,6 +55,5 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add history.txt stats.json
           git commit -m "Update history and stats [skip ci]" || echo "No changes to commit"
-          # pushの前に最新状態を取り込んで衝突を回避する
           git pull --rebase origin main
           git push origin main
