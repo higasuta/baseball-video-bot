@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力設定
-print("🚀 プレイボール速報・新章（Yahoo API奪還 ＋ ラベル抹殺モード）起動...")
+print("🚀 プレイボール速報・システム最終形態（NPB奪還 ＋ ラベル抹殺モード）起動...")
 sys.stdout.flush()
 
 import requests
@@ -70,35 +70,27 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def get_npb_video(history):
-    """【最強ルート】Yahooの動画リストAPIを直接叩く"""
-    print("🔍 NPB探索 (Yahoo Sportsnavi API)...")
-    # Yahooが内部的に使用している、ブロックされにくいJSON API
-    api_url = "https://sports.yahoo.co.jp/video/api/list/promo/live/baseball/npb"
-    
+    """【新ルート】Dailymotionのパ・リーグ公式チャンネルから動画を探索"""
+    print("🔍 NPB探索 (Dailymotion パ・リーグ公式)...")
+    url = "https://www.dailymotion.com/PacificLeague/videos"
     candidates = []
     try:
-        res = requests.get(api_url, timeout=20)
-        data = res.json()
+        # DailymotionはGitHubのIPブロックを受けにくいため、非常に安定しています
+        cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--playlist-end', '10', '--quiet', url]
+        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=60).decode().split('\n')
         
-        for item in data.get('items', []):
-            v_id = str(item.get('videoId'))
-            title = item.get('title', '')
-            v_url = f"https://sports.yahoo.co.jp/video/player/{v_id}"
-            
+        for i in range(0, len(output)-2, 3):
+            title, v_id, v_url = output[i].strip(), output[i+1].strip(), output[i+2].strip()
             if v_id and v_id not in history:
                 if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
-                print(f"  ✅ Yahoo APIで発見: {title}")
-                candidates.append({
-                    "title": title, "url": v_url, "id": v_id, 
-                    "type": "npb", "source": "スポーツナビ", "priority": 1
-                })
+                print(f"  ✅ NPB動画を発見: {title}")
+                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "パ・リーグTV"})
         return candidates
-    except Exception as e:
-        print(f"  ⚠️ Yahoo APIルート失敗: {e}")
+    except:
         return []
 
 def get_mlb_video(history, is_test_mode):
-    print("🔍 MLB動画を探索中（日本人15名限定）...")
+    print("🔍 MLB動画を探索中（日本人15名4パターン検索）...")
     candidates = []
     for day_offset in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -117,7 +109,7 @@ def get_mlb_video(history, is_test_mode):
                             v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                             if v_url and v_id not in history:
                                 if any(kw in title.lower() for kw in JPN_KEYWORDS):
-                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2})
+                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
                     except: continue
         except: continue
     return candidates
@@ -132,26 +124,30 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         prompt = f"""
         野球動画({title})を解析し、以下の形式で出力せよ。
 
-        [数値1つ]
+        [数値1つのみ]
         [本文]
 
         【ルール】
-        ・一段目：【 】付きの鋭い見出し。二段目：要約。三段目：アナリスト視点の鋭い所感。
-        ・四段目：[0:05] 〇〇の瞬間、のようにタイムスタンプを自然に添えろ。
-        ・「です・ます」禁止。標準語の「だ・である」調を徹底。
-        ・START: や CAPTION: などのラベル、ネットスラングは禁止。
-        ・ハッシュタグは合計25個程度（中黒禁止）。引用：{source_account} を最後に。
+        ・1行目：開始秒数を数値1つだけで書け。
+        ・2行目以降：キャプション本文を書け。
+        ・あなたは野球まとめ動画の少し皮肉っぽいが愛のあるベテランナレーターだ。
+        ・一段目に見出し、二段目に要約、三段目に鋭い所感、四段目に自然なタイムスタンプ。
+        ・「です・ます」禁止。標準語の「だ・である」調を徹底せよ。
+        ・START: や CAPTION: などのラベル、ネットスラングは一切禁止。
+        ・ハッシュタグは合計25個。引用：{source_account} を最後に。
         """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
 
         # 【物理抹殺】ラベル文字を正規表現で強制削除
-        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感|動画|解析|結果)[:：]\s*', '', res_text).strip()
+        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感)[:：]\s*', '', res_text).strip()
         
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+        if not lines: return 0, None
+        
         start_sec = 0
-        first_line_match = re.search(r"(\d+)", lines[0]) if lines else None
+        first_line_match = re.search(r"(\d+)", lines[0])
         if first_line_match:
             start_sec = int(first_line_match.group(1))
             ai_caption = "\n".join(lines[1:])
@@ -182,7 +178,8 @@ def main():
     mlb_ratio = stats['mlb'] / total_posted if total_posted > 0 else 0
     print(f"📊 MLB比率: {mlb_ratio*100:.1f}%")
 
-    candidates.sort(key=lambda x: x.get('priority', 2))
+    # 優先度順にソート (NPBを最優先)
+    candidates.sort(key=lambda x: 1 if x['type'] == 'npb' else 2)
     
     for video in candidates:
         if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_list) > 0:
@@ -190,14 +187,13 @@ def main():
 
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
-        # iPhone偽装でダウンロード検閲を突破
-        ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+        # 全て yt-dlp で統一（DailymotionとMLB APIは安定）
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         cmd = ['yt-dlp', '-o', temp_input, '--user-agent', ua, '--no-check-certificates', '--quiet', video['url']]
         res = subprocess.run(cmd)
         
         if res.returncode != 0 or not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
-            print(f"  ❌ ダウンロード失敗: 次の候補を試します。")
-            continue
+            print("  ❌ ダウンロード失敗。次を試します。"); continue
 
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
         if ai_caption is None:
@@ -213,7 +209,8 @@ def main():
                 if res.get('status') == 'success':
                     public_url = res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
                     print(f"✅ 公開URL確保")
-                    time.sleep(10)
+                    time.sleep(15) # クラウド側での定着待機
+                    
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                     
                     if 'id' in post_res:
@@ -221,7 +218,8 @@ def main():
                         for _ in range(20):
                             time.sleep(30)
                             status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
-                            status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                            status = str(status_res.get('status_code') or status_res.get('status') or "").upper()
+                            print(f"  API Response: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 print(f"🏁 投稿完了！")
