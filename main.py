@@ -1,6 +1,6 @@
 import sys
-# リアルタイムログ出力設定
-print("🚀 プレイボール速報・システム稼働（嘘を許さない徹底ログ ＋ 掘り起こしモード）...")
+# 1行目からリアルタイムログを出力
+print("🚀 プレイボール速報・システム稼働（プレー映像広域カバーモード）...")
 sys.stdout.flush()
 
 import requests
@@ -11,6 +11,7 @@ import subprocess
 import google.generativeai as genai
 import json
 import re
+import xml.etree.ElementTree as ET
 
 # ==========================================
 # 設定・環境変数の読み込み
@@ -22,7 +23,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# 【完全網羅】日本人選手（15名 × 4パターン）
+# 【完全網羅】日本人選手（15名 × 4パターン = 60キーワード）
 JPN_KEYWORDS = [
     "大谷翔平", "大谷", "shohei ohtani", "ohtani",
     "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto",
@@ -41,7 +42,12 @@ JPN_KEYWORDS = [
     "村上宗隆", "村上", "munetaka murakami", "murakami"
 ]
 
-BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights", "outing", "talks"]
+# 【調整】地味な「静止画」や「事務的」な動画のみを排除
+BLACK_KEYWORDS = [
+    "probable", "pitchers", "lineup", "interview", "press", "availability", 
+    "roster", "update", "alignment", "summary", "preview", "warmup", 
+    "pre-game", "recap", "daily"
+]
 
 def get_stats():
     if os.path.exists('stats.json'):
@@ -70,44 +76,28 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def get_npb_video(history):
-    """DailymotionからNPB動画を深層スキャン"""
-    print("🔍 NPB探索 (Dailymotion パ・リーグ公式)...")
-    url = "https://www.dailymotion.com/PacificLeague/videos"
-    candidates = []
-    try:
-        # スキャン範囲を30件に拡大
-        cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--playlist-end', '30', '--quiet', url]
-        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=60).decode().split('\n')
-        
-        found_count = 0
-        skip_history = 0
-        skip_black = 0
-
-        for i in range(0, len(output)-2, 3):
-            found_count += 1
-            title, v_id, v_url = output[i].strip(), output[i+1].strip(), output[i+2].strip()
-            
-            if v_id in history:
-                skip_history += 1; continue
-            if any(kw in title.lower() for kw in BLACK_KEYWORDS):
-                skip_black += 1; continue
-                
-            candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "パ・リーグTV"})
-        
-        print(f"  👉 総数:{found_count}件 (既読スキップ:{skip_history}, 地味スキップ:{skip_black})")
-        return candidates
-    except:
-        print("  ⚠️ Dailymotionスキャン失敗。")
-        return []
+    """YouTube RSSから動画をスキャン"""
+    feeds = [{"name": "パ・リーグTV", "id": "UC0v-pxTo1XamIDE-f__Ad0Q"}]
+    for feed in feeds:
+        url = f"https://www.youtube.com/feeds/videos.xml?channel_id={feed['id']}"
+        try:
+            res = requests.get(url, timeout=15)
+            root = ET.fromstring(res.content)
+            ns = {'ns': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
+            for entry in root.findall('ns:entry', ns):
+                v_id = entry.find('yt:videoId', ns).text
+                title = entry.find('ns:title', ns).text
+                if v_id not in history:
+                    # 静止画・会見以外のプレー映像なら何でもOK
+                    if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
+                    return {"title": title, "url": f"https://www.youtube.com/watch?v={v_id}", "id": v_id, "type": "npb", "source": "パ・リーグTV"}
+        except: continue
+    return None
 
 def get_mlb_video(history, is_test_mode):
-    """MLB APIから動画を過去4日間スキャン"""
-    print(f"🔍 MLB探索 (過去4日間を調査)...")
-    candidates = []
-    found_count = 0
-    skip_history = 0
-    
-    for day_offset in range(4):
+    """MLB APIから取得"""
+    print("🔍 MLB動画を探索中...")
+    for day_offset in range(4): # 4日前まで遡る
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
@@ -119,25 +109,17 @@ def get_mlb_video(history, is_test_mode):
                         content = requests.get(f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content").json()
                         highlights = content.get('highlights', {}).get('highlights', {}).get('items', [])
                         for item in highlights:
-                            found_count += 1
                             title = item.get('headline', '')
                             v_id = str(item.get('id'))
                             v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
-                            
                             if v_url and v_id not in history:
-                                # 日本人選手チェック
-                                if any(kw in title.lower() for kw in JPN_KEYWORDS):
-                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
-                                # テストモード時のみ：日本人以外でもホームランなら特別に採用
-                                elif is_test_mode and "home run" in title.lower():
-                                    candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
-                            elif v_id in history:
-                                skip_history += 1
+                                # 静止画・会見以外のプレー映像なら何でもOK
+                                if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
+                                if any(kw in title.lower() for kw in JPN_KEYWORDS) or is_test_mode:
+                                    return {"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"}
                     except: continue
         except: continue
-    
-    print(f"  👉 総数:{found_count}件 (既読スキップ:{skip_history})")
-    return candidates
+    return None
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
     print(f"🧠 AIによる動画解析中...")
@@ -150,20 +132,33 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         野球動画({title})を解析し、以下を出力せよ。
         [開始秒数(数値のみ)を1行目]
         [本文を2行目以降]
-        ルール：野球2chまとめ風の少し鋭い解説。ですます禁止。
-        ラベル(START:等)は絶対書くな。タグ25個。引用：{source_account}
+
+        【ルール】
+        ・一段目：【 】付きの鋭い見出し。
+        ・二段目：ニュースの核心。
+        ・三段目：愛のある皮肉を交えたアナリストの鋭い所感（だ・である調）。
+        ・四段目：[0:05] 〇〇の瞬間、のようにタイムスタンプを自然に添えろ。
+        ・「です・ます」禁止。標準語の「だ・である」調を徹底せよ。
+        ・START: や CAPTION: などのラベル、ネットスラングは禁止。
+        ・ハッシュタグは合計25〜30個（中黒禁止）。引用：{source_account} を最後に。
         """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
+
+        # 【物理抹殺】ラベル文字を正規表現で強制削除
         clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感)[:：]\s*', '', res_text).strip()
+        
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         start_sec = 0
         first_line_match = re.search(r"(\d+)", lines[0]) if lines else None
         if first_line_match:
             start_sec = int(first_line_match.group(1))
             ai_caption = "\n".join(lines[1:])
-        else: ai_caption = "\n".join(lines)
+        else:
+            ai_caption = "\n".join(lines)
+            
+        print(f"  ✨ AI解析成功: 開始 {start_sec}s")
         return start_sec, ai_caption
     except: return None, None
 
@@ -176,36 +171,28 @@ def main():
     cleanup_gemini_storage()
     flash_model = get_available_flash_model()
     
-    print(f"⚾️ 探索開始... (テストモード: {is_test_mode})")
-    npb_list = get_npb_video(history)
-    mlb_list = get_mlb_video(history, is_test_mode)
-    candidates = npb_list + mlb_list
-    
-    if not candidates:
-        print("😴 本当に新着がありません。history.txt を空にすると過去分を再投稿できます。")
-        return
+    print(f"⚾️ 探索開始...")
+    video_data = get_npb_video(history) or get_mlb_video(history, is_test_mode)
 
-    total_posted = stats['npb'] + stats['mlb']
-    mlb_ratio = stats['mlb'] / total_posted if total_posted > 0 else 0
-    print(f"📊 MLB比率: {mlb_ratio*100:.1f}%")
-
-    # NPBを最優先、次に日本人MLB
-    candidates.sort(key=lambda x: 1 if x['type'] == 'npb' else 2)
-    
-    for video in candidates:
-        if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_list) > 0:
-            continue
-
-        print(f"🎯 ターゲット確定: {video['title']}")
+    if video_data:
+        print(f"🎯 ターゲット確定: {video_data['title']}")
         temp_input = "temp_video.mp4"
-        subprocess.run(['curl', '-L', video['url'], '-o', temp_input])
+        
+        # パ・リーグTV(YouTube)ならandroid偽装、MLBならcurl
+        if "YouTube" in video_data.get('source', '') or "watch" in video_data['url']:
+            cmd = ['yt-dlp', '-o', temp_input, '--extractor-args', 'youtube:player_client=android', '--no-check-certificates', '--quiet', video_data['url']]
+        else:
+            cmd = ['curl', '-L', video_data['url'], '-o', temp_input]
+        
+        subprocess.run(cmd)
         
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
-            continue
+            print("❌ ダウンロード失敗。"); return
 
-        start_sec, ai_caption = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
+        start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source'], flash_model)
         if ai_caption is None:
-            with open(history_file, 'a') as fh: fh.write(video['id'] + "\n"); continue
+            # プレー無しと判断されたもののみ記録
+            with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n"); return
 
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
@@ -213,27 +200,30 @@ def main():
         
         try:
             with open(output_file, 'rb') as f:
-                res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
-                if res.get('status') == 'success':
-                    public_url = res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                    print(f"✅ 公開URL確保")
-                    time.sleep(10)
+                up_res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
+                if up_res.get('status') == 'success':
+                    public_url = up_res['data']['url'].replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                    print(f"✅ 公開URL確保: {public_url}")
+                    time.sleep(15) 
+
+                    print(f"📸 Instagram送信開始...")
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                     
                     if 'id' in post_res:
                         creation_id = post_res['id']
-                        for _ in range(20):
+                        print(f"⏳ 処理待機 (ID: {creation_id})...")
+                        for i in range(20):
                             time.sleep(30)
                             status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
                             status = (status_res.get('status_code') or status_res.get('status') or "").upper()
-                            print(f"  ステータス: {status}")
+                            print(f"  [{i+1}/20] API Response: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 print(f"🏁 投稿完了！")
-                                with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
-                                stats[video['type']] += 1; save_stats(stats); return
-        except Exception as e: print(f"  ❌ システムエラー: {e}")
-    print("😴 スキャン終了。")
+                                with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
+                                stats[video_data['type']] += 1; save_stats(stats); return
+        except Exception as e: print(f"  ❌ エラー: {e}")
+    else: print("😴 投稿対象なし。")
 
 if __name__ == "__main__":
     main()
