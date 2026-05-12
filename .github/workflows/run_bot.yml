@@ -2,8 +2,8 @@ name: Baseball Video Bot
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
-  workflow_dispatch:
+    - cron: '*/10 * * * *'  # 10分おきに自動実行
+  workflow_dispatch:      # 手動実行ボタン
     inputs:
       test_mode:
         description: 'Set to true for testing'
@@ -26,12 +26,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ★YouTubeの難読化コード解読のためにNode.jsをインストール
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
@@ -47,7 +41,13 @@ jobs:
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TEST_MODE: ${{ github.event.inputs.test_mode }}
-        run: python -u main.py
+          X_COOKIES: ${{ secrets.X_COOKIES }}
+        run: |
+          # Xのクッキーをファイルに書き出す
+          if [ -n "$X_COOKIES" ]; then
+            echo "$X_COOKIES" > x_cookies.txt
+          fi
+          python -u main.py
 
       - name: Commit and Push changes
         run: |
@@ -55,5 +55,6 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add history.txt stats.json
           git commit -m "Update history and stats [skip ci]" || echo "No changes to commit"
+          # pushの前に最新状態を強制取り込みしてエラーを防ぐ
           git pull --rebase origin main
           git push origin main
