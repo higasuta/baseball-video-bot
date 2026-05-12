@@ -1,6 +1,6 @@
 import sys
 # リアルタイムログ出力設定
-print("🚀 プレイボール速報・新章（Dailymotion奪還 ＋ ラベル抹殺モード）起動...")
+print("🚀 プレイボール速報・新章（Yahoo API奪還 ＋ ラベル抹殺モード）起動...")
 sys.stdout.flush()
 
 import requests
@@ -51,14 +51,12 @@ def get_stats():
     return {"npb": 75, "mlb": 25}
 
 def save_stats(stats):
-    # エラーの温床だった箇所を完全に修正
     with open('stats.json', 'w') as f:
         json.dump(stats, f)
 
 def cleanup_gemini_storage():
     try:
-        for f in genai.list_files():
-            genai.delete_file(f.name)
+        for f in genai.list_files(): genai.delete_file(f.name)
         print("🧹 AIストレージの掃除完了。")
     except: pass
 
@@ -72,31 +70,35 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def get_npb_video(history):
-    """【新ルート】Dailymotion パ・リーグ公式から動画を探索"""
-    print("🔍 NPB探索 (Dailymotion パ・リーグ公式)...")
-    url = "https://www.dailymotion.com/PacificLeague/videos"
+    """【最強ルート】Yahooの動画リストAPIを直接叩く"""
+    print("🔍 NPB探索 (Yahoo Sportsnavi API)...")
+    # Yahooが内部的に使用している、ブロックされにくいJSON API
+    api_url = "https://sports.yahoo.co.jp/video/api/list/promo/live/baseball/npb"
+    
     candidates = []
     try:
-        # DailymotionはYouTubeほど厳しくなく、GitHub Actionsからでも動画情報を取得可能
-        cmd = ['yt-dlp', '--get-id', '--get-title', '--get-url', '--playlist-end', '10', '--quiet', url]
-        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=60).decode().split('\n')
+        res = requests.get(api_url, timeout=20)
+        data = res.json()
         
-        for i in range(0, len(output)-2, 3):
-            title, v_id, v_url = output[i].strip(), output[i+1].strip(), output[i+2].strip()
+        for item in data.get('items', []):
+            v_id = str(item.get('videoId'))
+            title = item.get('title', '')
+            v_url = f"https://sports.yahoo.co.jp/video/player/{v_id}"
+            
             if v_id and v_id not in history:
                 if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
-                print(f"  ✅ DailymotionでNPB動画を発見: {title}")
+                print(f"  ✅ Yahoo APIで発見: {title}")
                 candidates.append({
                     "title": title, "url": v_url, "id": v_id, 
-                    "type": "npb", "source": "パ・リーグTV", "priority": 1
+                    "type": "npb", "source": "スポーツナビ", "priority": 1
                 })
         return candidates
-    except:
-        print("  ⚠️ Dailymotionスキャン失敗。")
+    except Exception as e:
+        print(f"  ⚠️ Yahoo APIルート失敗: {e}")
         return []
 
 def get_mlb_video(history, is_test_mode):
-    print("🔍 MLB動画を探索中（日本人15名4パターン検索）...")
+    print("🔍 MLB動画を探索中（日本人15名限定）...")
     candidates = []
     for day_offset in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -114,7 +116,6 @@ def get_mlb_video(history, is_test_mode):
                             v_id = str(item.get('id'))
                             v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                             if v_url and v_id not in history:
-                                # 日本人15名の網羅キーワードでチェック
                                 if any(kw in title.lower() for kw in JPN_KEYWORDS):
                                     candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan", "priority": 2})
                     except: continue
@@ -135,19 +136,18 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         [本文]
 
         【ルール】
-        ・一段目：【 】付きの鋭い見出し。
-        ・二段目：ニュースの核心。
-        ・三段目：愛のある皮肉を交えたアナリストの鋭い所感（だ・である調）。
+        ・一段目：【 】付きの鋭い見出し。二段目：要約。三段目：アナリスト視点の鋭い所感。
         ・四段目：[0:05] 〇〇の瞬間、のようにタイムスタンプを自然に添えろ。
+        ・「です・ます」禁止。標準語の「だ・である」調を徹底。
         ・START: や CAPTION: などのラベル、ネットスラングは禁止。
-        ・ハッシュタグは合計25〜30個。引用：{source_account} を最後に。
+        ・ハッシュタグは合計25個程度（中黒禁止）。引用：{source_account} を最後に。
         """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
 
         # 【物理抹殺】ラベル文字を正規表現で強制削除
-        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感)[:：]\s*', '', res_text).strip()
+        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感|動画|解析|結果)[:：]\s*', '', res_text).strip()
         
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         start_sec = 0
@@ -185,15 +185,14 @@ def main():
     candidates.sort(key=lambda x: x.get('priority', 2))
     
     for video in candidates:
-        # MLB比率調整
         if not is_test_mode and video['type'] == 'mlb' and mlb_ratio > 0.25 and len(npb_list) > 0:
             continue
 
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
-        
-        # DailymotionとMLB APIはcurlやyt-dlpで安定して落とせる
-        cmd = ['yt-dlp', '-o', temp_input, '--no-check-certificates', '--quiet', video['url']]
+        # iPhone偽装でダウンロード検閲を突破
+        ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+        cmd = ['yt-dlp', '-o', temp_input, '--user-agent', ua, '--no-check-certificates', '--quiet', video['url']]
         res = subprocess.run(cmd)
         
         if res.returncode != 0 or not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
@@ -228,7 +227,7 @@ def main():
                                 print(f"🏁 投稿完了！")
                                 with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
                                 stats[video['type']] += 1; save_stats(stats); return
-        except Exception as e: print(f"  ❌ エラー: {e}")
+        except Exception as e: print(f"  ❌ システムエラー: {e}")
     print("😴 スキャン終了。")
 
 if __name__ == "__main__":
