@@ -1,6 +1,6 @@
 import sys
-# リアルタイムログ出力
-print("🚀 プレイボール速報・システム最終進化（共同通信ルート ＋ AI安定化モード）起動...")
+# 1行目からログを出力し、バッファを強制解放
+print("🚀 プレイボール速報・システム最終形態（NHK公式JSON ＋ モデル自動選択）起動...")
 sys.stdout.flush()
 
 import requests
@@ -42,7 +42,7 @@ JPN_KEYWORDS = [
     "村上宗隆", "村上", "munetaka murakami", "murakami"
 ]
 
-BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights", "outing", "talks"]
+BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "daily"]
 
 def get_stats():
     if os.path.exists('stats.json'):
@@ -56,39 +56,47 @@ def save_stats(stats):
         json.dump(stats, f)
 
 def find_working_ai_model():
-    """2.0は制限が厳しすぎるため、1.5-flash系を優先的に選択"""
-    print("📋 安定稼働モデルを選択中...")
+    """あなたの環境で今本当に使えるモデル名を自動で探す"""
+    print("📋 利用可能なAIモデルをスキャン中...")
     try:
-        available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # 安定性の高い1.5-flashを最優先に固定
-        for target in ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest"]:
-            if target in available:
-                print(f"  ✅ 採用モデル: {target}")
-                return target
-        return available[0]
-    except: return "models/gemini-1.5-flash"
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # 優先順位: 2.0-flash -> 1.5-flash -> その他
+        for target in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash", "flash"]:
+            for m in available_models:
+                if target in m:
+                    print(f"  ✅ 採用モデル: {m}")
+                    return m
+        return available_models[0]
+    except Exception as e:
+        print(f"  ⚠️ モデル探索失敗: {e}")
+        return "models/gemini-1.5-flash"
 
 def get_npb_video(history):
-    """【完全新ルート】共同通信スポーツの独自動画フィードをスキャン"""
-    print("🔍 NPB探索 (共同通信 Kyodo News Sports)...")
-    url = "https://www.kyodo.co.jp/category/sports/"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+    """【完全未踏ルート】NHKスポーツの公式JSONデータを直接取得"""
+    print("🔍 NPB探索 (NHK公式Sports JSON)...")
+    # 検閲をすり抜けやすい生データエンドポイント
+    url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     
     try:
-        res = requests.get(url, headers=headers, timeout=20)
-        # 共同通信独自の動画付きポスト形式を抽出
-        matches = re.findall(r'href="(https://www\.kyodo\.co\.jp/sports/(\d+-\d+-\d+)/)"[^>]*?>(.*?)</a>', res.text)
-        for v_url, v_id, title in matches:
+        res = requests.get(url, timeout=20)
+        data = res.json()
+        
+        # ハイライト動画のリストを抽出
+        for clip in data.get('clips', []):
+            v_id = str(clip.get('id'))
+            title = clip.get('title', '')
+            v_url = clip.get('video_url') or f"https://www3.nhk.or.jp/sports/special/baseball/npb/videos/{v_id}"
+            
             if v_id not in history:
-                if any(k in title for k in ["プロ野球", "安打", "本塁打", "奪三振", "勝利"]):
-                    print(f"  ✅ 共同通信ルートで発見: {title}")
-                    return {"title": title.strip(), "url": v_url, "id": v_id, "type": "npb", "source": "共同通信"}
+                if any(kw in title.lower() for kw in BLACK_KEYWORDS): continue
+                print(f"  ✅ NHK公式データで発見: {title}")
+                return {"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "NHKスポーツ"}
     except: pass
     return None
 
 def get_mlb_video(history, is_test_mode):
     print("🔍 MLB動画を探索中（日本人15名限定）...")
-    for day_offset in [0, 1, 2]:
+    for day_offset in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
@@ -111,38 +119,49 @@ def get_mlb_video(history, is_test_mode):
     return None
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
-    """【執念】429制限時に自動待機・リトライするAI解析ロジック"""
     print(f"🧠 AIによる動画解析中...")
-    model = genai.GenerativeModel(model_name)
-    
-    for attempt in range(2): # 最大2回試行
+    try:
+        # クォータ（容量）制限対策として古いファイルを掃除
         try:
-            # クォータ掃除
             for f in genai.list_files(): genai.delete_file(f.name)
-            
-            video_file = genai.upload_file(path=video_path)
-            while video_file.state.name == "PROCESSING": time.sleep(5); video_file = genai.get_file(video_file.name)
-            
-            prompt = f"野球動画({title})を解析し、見どころ開始秒数を[数値のみ]、2ch風キャプションを[本文]で出力せよ。ですます禁止。ラベル禁止。引用：{source_account}を最後に。タグ25個。"
-            response = model.generate_content([prompt, video_file])
-            res_text = response.text
-            genai.delete_file(video_file.name)
+        except: pass
 
-            # ラベル抹殺
-            clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感)[:：]\s*', '', res_text).strip()
-            lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-            start_sec = int(re.search(r"(\d+)", lines[0]).group(1)) if lines else 0
+        video_file = genai.upload_file(path=video_path)
+        while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
+        
+        model = genai.GenerativeModel(model_name)
+        prompt = f"""
+        野球動画({title})を解析し、以下を出力せよ。
+
+        [数値1つのみを1行目に]
+        [本文を2行目以降に]
+
+        【ルール】
+        ・一段目：【 】付きの鋭い見出し。皮肉や分析を交えた煽り見出しから始めろ。
+        ・二段目以降：ニュース要約と鋭い所感。
+        ・[0:05] のような形式のタイムスタンプを本文に自然に組み込め。
+        ・標準語「だ・である」調。ですます禁止。START等のラベルも絶対出すな。
+        ・ハッシュタグ25個。引用：{source_account} を最後に。
+        """
+        response = model.generate_content([prompt, video_file])
+        res_text = response.text
+        genai.delete_file(video_file.name)
+
+        # 【物理抹殺】不純なラベル文字(START:等)を正規表現で強制削除
+        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感)[:：]\s*', '', res_text).strip()
+        
+        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+        start_sec = 0
+        first_line_match = re.search(r"(\d+)", lines[0]) if lines else None
+        if first_line_match:
+            start_sec = int(first_line_match.group(1))
             ai_caption = "\n".join(lines[1:])
-            print(f"  ✨ AI解析成功: 開始 {start_sec}s")
-            return start_sec, ai_caption
-
-        except Exception as e:
-            if "429" in str(e) and attempt == 0:
-                print("  ⚠️ AI制限を検知。ログの指示通り20秒待機してリトライします...")
-                time.sleep(20)
-                continue
-            print(f"  ❌ AI解析失敗: {e}")
-            return 0, None
+        else:
+            ai_caption = "\n".join(lines)
+            
+        print(f"  ✨ AI解析成功: 開始 {start_sec}s")
+        return start_sec, ai_caption
+    except: return None, None
 
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
@@ -150,7 +169,9 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
+    # 今動くモデルを自動取得
     flash_model = find_working_ai_model()
+    
     print(f"⚾️ 探索開始...")
     video_data = get_npb_video(history) or get_mlb_video(history, is_test_mode)
 
@@ -160,7 +181,7 @@ def main():
         subprocess.run(['curl', '-L', video_data['url'], '-o', temp_input])
         
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
-            # yt-dlpでの代替
+            # yt-dlpでの代替ダウンロード
             subprocess.run(['yt-dlp', '-o', temp_input, '--no-check-certificates', '--quiet', video_data['url']])
 
         if not os.path.exists(temp_input) or os.path.getsize(temp_input) < 10000:
@@ -168,7 +189,7 @@ def main():
 
         start_sec, ai_caption = analyze_video_with_ai(temp_input, video_data['title'], video_data['source'], flash_model)
         if ai_caption is None:
-            # 解析失敗時はIDを記録して次へ
+            # AIが不採用にした（プレーがない等）場合は記録だけして次へ
             with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n"); return
 
         output_file = "output.mp4"
@@ -186,19 +207,18 @@ def main():
                     
                     if 'id' in post_res:
                         creation_id = post_res['id']
-                        for _ in range(20):
+                        print(f"⏳ 完了待機...")
+                        for i in range(20):
                             time.sleep(30)
                             status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code,status', 'access_token': ACCESS_TOKEN}).json()
                             status = (status_res.get('status_code') or status_res.get('status') or "").upper()
+                            print(f"  API Response: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 print(f"🏁 投稿完了！")
-                                with open(history_file, 'a') as fh:
-                                    fh.write(video_data['id'] + "\n")
-                                stats[video_data['type']] += 1
-                                save_stats(stats)
-                                return
-        except Exception as e: print(f"  ❌ システムエラー: {e}")
+                                with open(history_file, 'a') as fh: fh.write(video_data['id'] + "\n")
+                                stats[video_data['type']] += 1; save_stats(stats); return
+        except Exception as e: print(f"  ❌ エラー: {e}")
     else: print("😴 投稿対象なし。")
 
 if __name__ == "__main__":
