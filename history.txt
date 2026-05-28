@@ -189,3 +189,4 @@ data-viz-munetaka-murakami-s-20th-homer
 munetaka-murakami-s-108-3-mph-432-foot-home-run
 field-view-munetaka-murakami-s-20th-home-run
 andrew-morris-in-play-run-s-to-munetaka-murakami
+eric-orze-in-play-no-out-to-munetaka-murakami
