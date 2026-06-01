@@ -1,60 +1,47 @@
-name: Baseball Video Bot
+name: Playball Bot (Self-hosted Runner)
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # 10分おきに自動実行
-  workflow_dispatch:      # 手動実行ボタン
-    inputs:
-      test_mode:
-        description: 'Set to true for testing'
-        default: 'false'
-        required: false
+    - cron: '*/10 * * * *' # 10分おきに実行
+  workflow_dispatch: # 手動実行ボタンも有効化
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    # クラウドではなく、あなたの自宅PC（Self-hosted）で動かす指定
+    runs-on: self-hosted
+
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+      # 1. 履歴の衝突を防ぐための同期
+      - name: Sync Repository
+        run: |
+          git config --local user.email "bot@example.com"
+          git config --local user.name "PlayballBot"
+          git pull origin main --rebase
 
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Install dependencies
+      # 2. 依存ライブラリの更新（yt-dlpは常に最新にする）
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -U yt-dlp
-          pip install requests google-generativeai
+          pip install -U requests google-generativeai yt-dlp
 
-      - name: Run bot
+      # 3. メインスクリプトの実行
+      # 環境変数はGitHubのSettings > Secretsに登録したものを使用
+      - name: Run Playball Bot
         env:
           INSTA_BUSINESS_ID: ${{ secrets.INSTA_BUSINESS_ID }}
           INSTA_ACCESS_TOKEN: ${{ secrets.INSTA_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TEST_MODE: ${{ github.event.inputs.test_mode }}
-          X_COOKIES: ${{ secrets.X_COOKIES }}
-        run: |
-          # Xのクッキーをファイルに書き出す
-          if [ -n "$X_COOKIES" ]; then
-            echo "$X_COOKIES" > x_cookies.txt
-          fi
-          python -u main.py
+          TEST_MODE: false
+        run: python main.py
 
-      - name: Commit and Push changes
+      # 4. 投稿済みID(history.txt)と比率(stats.json)を保存
+      - name: Commit and Push Changes
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add history.txt stats.json
           git commit -m "Update history and stats [skip ci]" || echo "No changes to commit"
-          # pushの前に最新状態を強制取り込みしてエラーを防ぐ
-          git pull --rebase origin main
           git push origin main
