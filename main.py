@@ -1,4 +1,5 @@
 import sys
+# 1行目からリアルタイムでログを出力
 print("🚀 プレイボール速報・システム最終形態（最新SDK ＋ 字幕焼き込み）起動...")
 sys.stdout.flush()
 
@@ -7,7 +8,7 @@ import datetime
 import os
 import time
 import subprocess
-from google import genai  # 最新SDKに切り替え
+from google import genai
 import json
 import re
 
@@ -18,7 +19,6 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# 最新SDKのクライアント初期化
 client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -52,9 +52,8 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
-    print(f"🧠 AIによる動画解析中 (MLB翻訳モード: {is_mlb})...")
+    print(f"🧠 AIによる動画解析中 (使用モデル: {model_name} / MLB翻訳: {is_mlb})...")
     try:
-        # 最新SDKのアップロード手順
         with open(video_path, 'rb') as f:
             uploaded_file = client.files.upload(file=f, config={'mime_type': 'video/mp4'})
         
@@ -81,11 +80,12 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         {subtitle_instruction}
 
         【ルール】
-        ・本文：【 】付きの見出し。要約。所感（だ・である調）。タイムスタンプを自然に入れろ。
+        ・本文：【 】付きの見出し。要約。所感（だ・である調）。
         ・ハッシュタグは合計25〜30個。引用：{source_account} を最後に。
         """
         
-        response = client.models.generate_content(model=model_id, contents=[uploaded_file, prompt])
+        # 【修正】model_id から model_name に修正
+        response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
         res_text = response.text
         client.files.delete(name=uploaded_file.name)
 
@@ -113,7 +113,6 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         print(f"  ⚠️ AI解析失敗: {e}")
         return 0, None, None
 
-# --- get_npb_video, get_mlb_video は変更なし ---
 def get_npb_video(history):
     url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     candidates = []
@@ -161,12 +160,16 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    cleanup_gemini_storage()
+    if client: cleanup_gemini_storage()
     model_name = get_available_flash_model()
     
     candidates = get_npb_video(history) + get_mlb_video(history, is_test_mode)
-    if not candidates: return
+    if not candidates:
+        print("😴 新着なし。終了します。")
+        return
 
+    candidates.sort(key=lambda x: 1 if x['type'] == 'npb' else 2)
+    
     for video in candidates:
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
@@ -186,7 +189,6 @@ def main():
             filter_complex += ",subtitles=subtitles.srt:force_style='Fontname=Noto Sans CJK JP Bold,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2'"
             print("🎨 日本語翻訳字幕を焼き込み中...")
 
-        # ffmpegをフルパスで叩かずともPATHが通っていればOK。環境構築で解決済み。
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
         try:
@@ -207,6 +209,7 @@ def main():
                                 with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
                                 stats[video['type']] += 1; save_stats(stats); return
         except Exception as e: print(f"  ❌ システムエラー: {e}")
+    print("😴 終了。")
 
 if __name__ == "__main__":
     main()
