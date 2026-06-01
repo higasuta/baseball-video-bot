@@ -1,4 +1,5 @@
 import sys
+# 1行目からリアルタイムでログを出力
 print("🚀 プレイボール速報・システム最終形態（MLB翻訳字幕 ＋ NHK公式）起動...")
 sys.stdout.flush()
 
@@ -21,7 +22,9 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# 【完全網羅】日本人選手（15名）
 JPN_KEYWORDS = ["大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto", "佐々木朗希", "佐々木", "roki sasaki", "sasaki", "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish", "松井裕樹", "松井", "yuki matsui", "matsui", "鈴木誠也", "鈴木", "seiya suzuki", "suzuki", "今永昇太", "今永", "shota imanaga", "imanaga", "千賀滉大", "千賀", "kodai senga", "senga", "菅野智之", "菅野", "tomoyuki sugano", "sugano", "小笠原慎之介", "小笠原", "shinnosuke ogasawara", "ogasawara", "岡本和真", "岡本", "kazuma okamoto", "okamoto", "今井達也", "今井", "tatsuya imai", "imai", "吉田正尚", "吉田", "masataka yoshida", "yoshida", "菊池雄星", "菊池", "yusei kikuchi", "kikuchi", "村上宗隆", "村上", "munetaka murakami", "murakami"]
+
 BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights", "outing", "talks"]
 
 def get_stats():
@@ -49,70 +52,8 @@ def get_available_flash_model():
         return model_names[0] if model_names else "models/gemini-1.5-flash"
     except: return "models/gemini-1.5-flash"
 
-def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
-    """AIによる動画解析（MLB時は翻訳字幕SRTも同時生成）"""
-    print(f"🧠 AIによる動画解析中 (MLB翻訳モード: {is_mlb})...")
-    try:
-        video_file = genai.upload_file(path=video_path)
-        while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
-        model = genai.GenerativeModel(model_name)
-        
-        # MLBの場合は実況の日本語訳SRTを要求する
-        subtitle_instruction = ""
-        if is_mlb:
-            subtitle_instruction = """
-            また、動画の英語実況を完璧に聞き取り、以下の形式で日本語訳字幕データ(SRT)を作成せよ。
-            [SRT_START]
-            1
-            00:00:01,000 --> 00:00:04,000
-            実況：入ったー！ホームランだ！
-            [SRT_END]
-            ※SRTは日本語のみ。不自然な直訳は避け、日本のプロ野球中継風にせよ。
-            """
-
-        prompt = f"""
-        野球動画({title})を解析し、以下を出力せよ。
-        [数値1つ(開始秒数)]
-        [本文]
-        {subtitle_instruction}
-
-        【ルール】
-        ・本文：【 】付きの鋭い見出し。要約。所感（だ・である調）。タイムスタンプを自然に入れろ。
-        ・START: や CAPTION: などのラベルは禁止。
-        ・ハッシュタグは合計25〜30個。引用：{source_account} を最後に。
-        """
-        
-        response = model.generate_content([prompt, video_file])
-        res_text = response.text
-        genai.delete_file(video_file.name)
-
-        # SRTデータの抽出
-        srt_data = None
-        if is_mlb:
-            srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
-            if srt_match:
-                srt_data = srt_match.group(1).strip()
-                res_text = res_text.replace(srt_match.group(0), "")
-
-        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感|SRT)[:：]\s*', '', res_text).strip()
-        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-        if not lines: return 0, None, None
-        
-        start_sec = 0
-        first_line_match = re.search(r"(\d+)", lines[0])
-        if first_line_match:
-            start_sec = int(first_line_match.group(1))
-            ai_caption = "\n".join(lines[1:])
-        else:
-            ai_caption = "\n".join(lines)
-            
-        return start_sec, ai_caption, srt_data
-    except Exception as e:
-        print(f"  ⚠️ AI解析失敗: {e}")
-        return 0, None, None
-
-# --- get_npb_video, get_mlb_video は変更なしのため省略 (あなたのコードをそのまま使用) ---
 def get_npb_video(history):
+    print("🔍 NPB探索 (NHK公式Sports JSON)...")
     url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     candidates = []
     try:
@@ -131,6 +72,7 @@ def get_npb_video(history):
     except: return []
 
 def get_mlb_video(history, is_test_mode):
+    print("🔍 MLB動画を探索中（公式API）...")
     candidates = []
     for day_offset in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -153,6 +95,69 @@ def get_mlb_video(history, is_test_mode):
         except: continue
     return candidates
 
+def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
+    """AIによる動画解析（MLB時は翻訳字幕SRTも同時に生成）"""
+    print(f"🧠 AIによる動画解析中 (MLB翻訳モード: {is_mlb})...")
+    try:
+        video_file = genai.upload_file(path=video_path)
+        while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
+        model = genai.GenerativeModel(model_name)
+        
+        subtitle_instruction = ""
+        if is_mlb:
+            subtitle_instruction = """
+            また、動画の英語実況を完璧に聞き取り、以下の形式で日本語訳字幕データ(SRT)を作成せよ。
+            [SRT_START]
+            1
+            00:00:01,000 --> 00:00:04,000
+            実況：入ったー！ホームランだ！
+            [SRT_END]
+            ※SRTは日本語のみ。日本のプロ野球中継風の熱狂的な実況調にせよ。
+            """
+
+        prompt = f"""
+        野球動画({title})を解析し、以下を出力せよ。
+        [数値1つ(開始秒数)]
+        [本文]
+        {subtitle_instruction}
+
+        【ルール】
+        ・本文：【 】付きの鋭い見出し。要約。所感（だ・である調）。
+        ・[0:05] 〇〇の瞬間、のようにタイムスタンプを自然に入れろ。
+        ・START: や CAPTION: などのラベル、ネットスラングは禁止。
+        ・ハッシュタグは合計25〜30個。引用：{source_account} を最後に。
+        """
+        
+        response = model.generate_content([prompt, video_file])
+        res_text = response.text
+        genai.delete_file(video_file.name)
+
+        # SRTデータの抽出
+        srt_data = None
+        if is_mlb:
+            srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
+            if srt_match:
+                srt_data = srt_match.group(1).strip()
+                res_text = res_text.replace(srt_match.group(0), "")
+
+        # ラベル物理抹殺
+        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感|SRT)[:：]\s*', '', res_text).strip()
+        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+        if not lines: return 0, None, None
+        
+        start_sec = 0
+        first_line_match = re.search(r"(\d+)", lines[0])
+        if first_line_match:
+            start_sec = int(first_line_match.group(1))
+            ai_caption = "\n".join(lines[1:])
+        else:
+            ai_caption = "\n".join(lines)
+            
+        return start_sec, ai_caption, srt_data
+    except Exception as e:
+        print(f"  ⚠️ AI解析失敗: {e}")
+        return 0, None, None
+
 def main():
     is_test_mode = os.getenv('TEST_MODE') == 'true'
     stats = get_stats(); history_file = "history.txt"
@@ -162,9 +167,15 @@ def main():
     cleanup_gemini_storage()
     flash_model = get_available_flash_model()
     
+    # 探索
     candidates = get_npb_video(history) + get_mlb_video(history, is_test_mode)
-    if not candidates: return
+    if not candidates:
+        print("😴 新着なし。終了します。")
+        return
 
+    # 優先度順にソート (NPBを優先)
+    candidates.sort(key=lambda x: 1 if x['type'] == 'npb' else 2)
+    
     for video in candidates:
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
@@ -173,12 +184,15 @@ def main():
         
         if not os.path.exists(temp_input): continue
 
-        # AI解析（MLBの場合は字幕データも受け取る）
-        start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model, is_mlb=(video['type'] == 'mlb'))
+        # AI解析
+        start_sec, ai_caption, srt_data = analyze_video_with_ai(
+            temp_input, video['title'], video['source'], flash_model, is_mlb=(video['type'] == 'mlb')
+        )
         
         if ai_caption is None: continue
 
         output_file = "output.mp4"
+        # 基本のリール加工フィルタ
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
         
         # MLBかつ字幕データがある場合、FFmpegで字幕を焼き込む
@@ -187,14 +201,14 @@ def main():
         if video['type'] == 'mlb' and srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf:
                 sf.write(srt_data)
-            # 字幕フィルターを追加 (フォント設定はUbuntuの標準Notoを指定)
-            filter_complex += ",subtitles=subtitles.srt:force_style='FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2'"
+            # クラウド(Ubuntu)用のフォント 'Noto Sans CJK JP Bold' を指定
+            filter_complex += ",subtitles=subtitles.srt:force_style='Fontname=Noto Sans CJK JP Bold,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2'"
             print("🎨 日本語翻訳字幕を焼き込み中...")
 
         ffmpeg_cmd += ['-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file]
         subprocess.run(ffmpeg_cmd)
         
-        # --- 投稿処理 (tmpfiles -> Instagram) は変更なし ---
+        # 投稿
         try:
             with open(output_file, 'rb') as f:
                 res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
@@ -214,6 +228,7 @@ def main():
                                 with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
                                 stats[video['type']] += 1; save_stats(stats); return
         except Exception as e: print(f"  ❌ システムエラー: {e}")
+    print("😴 終了。")
 
 if __name__ == "__main__":
     main()
