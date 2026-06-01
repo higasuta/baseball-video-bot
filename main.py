@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（字幕シンクロ ＋ サイズ最適化）起動...")
+print("🚀 プレイボール速報・システム最終形態（物理同期 ＋ 日本語限定字幕）起動...")
 sys.stdout.flush()
 
 import requests
@@ -51,29 +51,42 @@ def get_available_flash_model():
         return models[0]
     except: return "models/gemini-1.5-flash"
 
+def shift_srt_time(srt_text, offset_sec):
+    """SRTのタイムスタンプを指定秒数分、物理的に手前にずらす（物理同期）"""
+    def shift_match(match):
+        time_str = match.group(1)
+        h, m, s_ms = time_str.split(':')
+        s, ms = s_ms.split(',')
+        total_ms = (int(h)*3600 + int(m)*60 + int(s)) * 1000 + int(ms)
+        shifted_ms = max(0, total_ms - int(offset_sec * 1000))
+        
+        new_h = shifted_ms // 3600000
+        new_m = (shifted_ms % 3600000) // 60000
+        new_s = (shifted_ms % 60000) // 1000
+        new_ms = shifted_ms % 1000
+        return f"{new_h:02}:{new_m:02}:{new_s:02},{new_ms:03}"
+
+    return re.sub(r'(\d{2}:\d{2}:\d{2},\d{3})', shift_match, srt_text)
+
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
-    """AIによる動画解析（MLB時は字幕同期を厳密化）"""
-    print(f"🧠 AIによる動画解析中 (使用モデル: {model_name})...")
+    """AI解析（日本語限定 ＋ 物理同期用データ取得）"""
+    print(f"🧠 AIによる動画解析中...")
     try:
         with open(video_path, 'rb') as f:
             uploaded_file = client.files.upload(file=f, config={'mime_type': 'video/mp4'})
-        
-        while uploaded_file.state.name == "PROCESSING":
-            time.sleep(2)
-            uploaded_file = client.files.get(name=uploaded_file.name)
+        while uploaded_file.state.name == "PROCESSING": time.sleep(2); uploaded_file = client.files.get(name=uploaded_file.name)
         
         subtitle_instruction = ""
         if is_mlb:
             subtitle_instruction = """
             また、動画の英語実況を完璧に聞き取り、日本語訳字幕データ(SRT)を作成せよ。
-            【重要：シンクロ率のルール】
-            1. お前が抽出した[開始秒数]の時点を、SRTの 00:00:00,000 (起点) として計算しろ。
-            2. 実況の声と字幕のタイミングを0.1秒単位で完璧に一致させろ。
-            3. フォーマットは以下を厳守。
+            【厳守ルール】
+            1. 字幕は「日本語のみ」出力せよ。英語の原文は絶対に混ぜるな。
+            2. タイムスタンプは、動画ファイルの「冒頭(00:00:00)からの絶対時間」で正確に打て。
             [SRT_START]
             1
-            00:00:00,500 --> 00:00:03,000
-            実況：放ったー！場外ホームランだ！
+            00:00:15,200 --> 00:00:18,500
+            実況：センターへ大きな打球！入ったー！
             [SRT_END]
             """
 
@@ -84,9 +97,8 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         {subtitle_instruction}
 
         【ルール】
-        ・本文：【 】付きの見出し。要約。所感（だ・である調）。
-        ・ハッシュタグは合計25〜30個。引用：{source_account} を最後に。
-        ・START: などのラベルは禁止。
+        ・本文：【 】付きの見出し。要約。所感（だ・である調）。日本語のみ。
+        ・ハッシュタグは合計25〜30個。
         """
         
         response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
@@ -109,21 +121,22 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         if first_line_match:
             start_sec = int(first_line_match.group(1))
             ai_caption = "\n".join(lines[1:])
+            # 物理同期：SRTの時間をstart_sec分だけマイナスする
+            if srt_data:
+                srt_data = shift_srt_time(srt_data, start_sec)
         else:
             ai_caption = "\n".join(lines)
             
         return start_sec, ai_caption, srt_data
     except Exception as e:
-        print(f"  ⚠️ AI解析失敗: {e}")
-        return 0, None, None
+        print(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
 
 # --- get_npb_video, get_mlb_video は変更なし ---
 def get_npb_video(history):
     url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     candidates = []
     try:
-        res = requests.get(url, timeout=15)
-        data = res.json(); clips = data.get('clips', [])
+        res = requests.get(url, timeout=15); data = res.json(); clips = data.get('clips', [])
         found = 0
         for clip in clips:
             v_id = str(clip.get('id')); title = clip.get('title', '')
@@ -170,30 +183,26 @@ def main():
     
     candidates = get_npb_video(history) + get_mlb_video(history, is_test_mode)
     if not candidates: return
-
     candidates.sort(key=lambda x: 1 if x['type'] == 'npb' else 2)
     
     for video in candidates:
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
         subprocess.run(['yt-dlp', '-o', temp_input, '--quiet', video['url']])
-        
         if not os.path.exists(temp_input): continue
 
         start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], model_name, is_mlb=(video['type'] == 'mlb'))
-        
         if ai_caption is None: continue
 
         output_file = "output.mp4"
-        # 9:16リール加工
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
         
         if video['type'] == 'mlb' and srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
-            # 【修正】FontSize=15に変更、視認性向上のため半透明ボックス(BorderStyle=4)を追加、位置調整(MarginV=25)
-            subtitle_style = "Fontname=Noto Sans CJK JP Bold,FontSize=15,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=4,Outline=1,Shadow=0,MarginV=25"
+            # 【究極のサイズ・位置設定】FontSize=13, 座布団透明度調整, MarginV=40
+            subtitle_style = "Fontname=Noto Sans CJK JP Bold,FontSize=13,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H60000000,BorderStyle=4,Outline=1,Shadow=0,MarginV=40"
             filter_complex += f",subtitles=subtitles.srt:force_style='{subtitle_style}'"
-            print("🎨 日本語翻訳字幕をサイズ最適化して焼き込み中...")
+            print("🎨 字幕を物理同期・サイズ最小化して焼き込み中...")
 
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
