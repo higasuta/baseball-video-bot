@@ -1,5 +1,5 @@
 import sys
-print("🚀 プレイボール速報・システム最終形態（言語検知クリーナー ＋ 物理同期）起動...")
+print("🚀 プレイボール速報・システム起動（ログ透明化モード）...")
 sys.stdout.flush()
 
 import requests
@@ -51,13 +51,10 @@ def get_available_flash_model():
     except: return "models/gemini-1.5-flash"
 
 def is_japanese(text):
-    """文字列に日本語（ひらがな、カタカナ、漢字）が含まれているか判定"""
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
 
 def shift_srt_time(srt_text, offset_sec):
-    """SRTの時間を補正し、かつ『日本語を含まない原文行』のみを物理排除する"""
     correction = offset_sec + 0.5 
-
     def shift_match(match):
         time_str = match.group(1)
         h, m, s_ms = time_str.split(':')
@@ -68,22 +65,14 @@ def shift_srt_time(srt_text, offset_sec):
         new_m, rem = divmod(rem, 60000)
         new_s, new_ms = divmod(rem, 1000)
         return f"{new_h:02}:{new_m:02}:{new_s:02},{new_ms:03}"
-
     shifted_text = re.sub(r'(\d{2}:\d{2}:\d{2},\d{3})', shift_match, srt_text)
-    
     cleaned_lines = []
     for line in shifted_text.splitlines():
-        # 時間行、インデックス行はそのまま保持
         if "-->" in line or line.strip().isdigit():
             cleaned_lines.append(line)
         else:
-            # 1. AIが付加しがちな「英語：」「日本語：」などのラベルを削除
             line = re.sub(r'^(English|Original|Transcript|Source|原文|英語|日本語)[:：]\s*', '', line, flags=re.IGNORECASE)
-            # 2. 日本語が含まれている行のみを保持（これでMLBなどの英単語入り日本語は残る）
-            if is_japanese(line):
-                cleaned_lines.append(line)
-            # 3. 日本語がない行（＝純粋な英語原文）は、ここで無視される
-    
+            if is_japanese(line): cleaned_lines.append(line)
     return "\n".join(cleaned_lines)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
@@ -116,37 +105,30 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         ・【 】付きの見出し、要約、所感（だ・である調）。日本語のみ。
         ・ハッシュタグは合計25〜30個。
         """
-        
         response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
         res_text = response.text
         client.files.delete(name=uploaded_file.name)
-
         srt_data = None
         if is_mlb:
             srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
             if srt_match:
                 srt_data = srt_match.group(1).strip()
                 res_text = res_text.replace(srt_match.group(0), "")
-
         clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感|SRT)[:：]\s*', '', res_text).strip()
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         if not lines: return 0, None, None
-        
         start_sec = 0
         first_line_match = re.search(r"(\d+)", lines[0])
         if first_line_match:
             start_sec = int(first_line_match.group(1))
             ai_caption = "\n".join(lines[1:])
             if srt_data: srt_data = shift_srt_time(srt_data, start_sec)
-        else:
-            ai_caption = "\n".join(lines)
-            
+        else: ai_caption = "\n".join(lines)
         return start_sec, ai_caption, srt_data
-    except Exception as e:
-        print(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
+    except Exception as e: print(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
 
-# --- get_npb_video, get_mlb_video は変更なし ---
 def get_npb_video(history):
+    print("🔍 NPB探索 (NHK公式)...")
     url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     candidates = []
     try:
@@ -161,6 +143,7 @@ def get_npb_video(history):
     except: return []
 
 def get_mlb_video(history, is_test_mode):
+    print("🔍 MLB探索 (公式API)...")
     candidates = []
     for day_offset in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
@@ -192,8 +175,16 @@ def main():
     if client: cleanup_gemini_storage()
     model_name = get_available_flash_model()
     
-    candidates = get_npb_video(history) + get_mlb_video(history, is_test_mode)
-    if not candidates: return
+    npb_list = get_npb_video(history)
+    mlb_list = get_mlb_video(history, is_test_mode)
+    candidates = npb_list + mlb_list
+    
+    print(f"📊 探索結果: NPB新着={len(npb_list)}件, MLB新着={len(mlb_list)}件")
+
+    if not candidates:
+        print("😴 投稿すべき新しい動画は見つかりませんでした（全て投稿済みか、配信前です）。")
+        return
+
     candidates.sort(key=lambda x: 1 if x['type'] == 'npb' else 2)
     
     for video in candidates:
@@ -201,19 +192,14 @@ def main():
         temp_input = "temp_video.mp4"
         subprocess.run(['yt-dlp', '-o', temp_input, '--quiet', video['url']])
         if not os.path.exists(temp_input): continue
-
         start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], model_name, is_mlb=(video['type'] == 'mlb'))
         if ai_caption is None: continue
-
         output_file = "output.mp4"
         filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        
         if video['type'] == 'mlb' and srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
             subtitle_style = "Fontname=Noto Sans CJK JP Bold,FontSize=13,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H60000000,BorderStyle=4,Outline=1,Shadow=0,MarginV=45"
             filter_complex += f",subtitles=subtitles.srt:force_style='{subtitle_style}'"
-            print("🎨 字幕を焼き込み中（言語検知クリーナー適用済み）...")
-
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
         try:
@@ -221,7 +207,6 @@ def main():
                 res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
                 if res.get('status') == 'success':
                     public_url = res['data']['url'].replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                    time.sleep(10)
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                     if 'id' in post_res:
                         creation_id = post_res['id']
@@ -234,7 +219,7 @@ def main():
                                 with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
                                 stats[video['type']] += 1; save_stats(stats); return
         except Exception as e: print(f"  ❌ システムエラー: {e}")
-    print("😴 終了。")
+    print("😴 スキャン終了。")
 
 if __name__ == "__main__":
     main()
