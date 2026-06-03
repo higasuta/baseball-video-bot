@@ -12,7 +12,7 @@ def log(msg):
     print(f"{msg}")
     sys.stdout.flush()
 
-log("🚀 プレイボール速報・システム最終形態（FFmpegパス ＋ フォント同期）起動...")
+log("🚀 プレイボール速報・最終形態（AIリトライ ＋ FFmpeg同期）起動...")
 
 # ==========================================
 # 設定・環境変数
@@ -21,7 +21,7 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# ファイル名は相対パスで統一（FFmpegのパースエラー防止）
+# ファイル名は「./」を付けてカレントディレクトリを明示
 TMP_VIDEO = "temp_video.mp4"
 TMP_SRT = "subtitles.srt"
 OUT_VIDEO = "output.mp4"
@@ -70,41 +70,49 @@ def shift_srt_time(srt_text, offset_sec):
     return "\n".join(cleaned_lines)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
-    log(f"🧠 AI解析開始...")
-    try:
-        with open(video_path, 'rb') as f:
-            uploaded_file = client.files.upload(file=f, config={'mime_type': 'video/mp4'})
-        while uploaded_file.state.name == "PROCESSING":
-            time.sleep(2)
-            uploaded_file = client.files.get(name=uploaded_file.name)
-        
-        subtitle_instruction = ""
-        if is_mlb:
-            subtitle_instruction = "英語実況を日本語SRT字幕にせよ。日本語のみ。絶対同期。[SRT_START]...[SRT_END]で囲め。"
+    log(f"🧠 AI解析開始 (MLBモード: {is_mlb})...")
+    # 503エラー対策のリトライループ
+    for attempt in range(3):
+        try:
+            with open(video_path, 'rb') as f:
+                uploaded_file = client.files.upload(file=f, config={'mime_type': 'video/mp4'})
+            while uploaded_file.state.name == "PROCESSING":
+                time.sleep(2)
+                uploaded_file = client.files.get(name=uploaded_file.name)
+            
+            subtitle_instruction = ""
+            if is_mlb:
+                subtitle_instruction = "英語実況を日本語SRT字幕にせよ。日本語のみ。絶対同期。[SRT_START]...[SRT_END]で囲め。"
 
-        prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)]と[本文]を出力。{subtitle_instruction} 【ルール】見出し、要約、所感を日本語のみで。"
-        response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
-        res_text = response.text
-        client.files.delete(name=uploaded_file.name)
+            prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)]と[本文]を出力。{subtitle_instruction} 【ルール】見出し、要約、所感を日本語のみで。"
+            response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
+            res_text = response.text
+            client.files.delete(name=uploaded_file.name)
 
-        srt_data = None
-        if is_mlb:
-            srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
-            if srt_match: srt_data = shift_srt_time(srt_match.group(1).strip(), 0)
+            srt_data = None
+            if is_mlb:
+                srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
+                if srt_match: srt_data = shift_srt_time(srt_match.group(1).strip(), 0)
 
-        clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感|SRT)[:：]\s*', '', res_text).strip()
-        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-        if not lines: return 0, None, None
-        
-        start_sec = 0
-        match = re.search(r"(\d+)", lines[0])
-        if match:
-            start_sec = int(match.group(1))
-            ai_caption = "\n".join(lines[1:])
-        else: ai_caption = "\n".join(lines)
-        return start_sec, ai_caption, srt_data
-    except Exception as e:
-        log(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
+            clean_text = re.sub(r'(?i)(START|CAPTION|秒数|本文|開始|タイトル|見出し|概要|所感|SRT)[:：]\s*', '', res_text).strip()
+            lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+            if not lines: return 0, None, None
+            
+            start_sec = 0
+            match = re.search(r"(\d+)", lines[0])
+            if match:
+                start_sec = int(match.group(1))
+                ai_caption = "\n".join(lines[1:])
+            else: ai_caption = "\n".join(lines)
+            return start_sec, ai_caption, srt_data
+
+        except Exception as e:
+            if "503" in str(e) and attempt < 2:
+                log(f"  ⚠️ AI混雑中(503)。10秒後に再試行します ({attempt+1}/3)...")
+                time.sleep(10)
+                continue
+            log(f"  ⚠️ AI解析失敗: {e}")
+            return 0, None, None
 
 def main():
     history_file = "history.txt"
@@ -141,7 +149,8 @@ def main():
                 for game in date_data.get('games', []):
                     c_res = requests.get(f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content", timeout=10).json()
                     for item in c_res.get('highlights', {}).get('highlights', {}).get('items', []):
-                        title = item.get('headline', ''); v_id = str(item.get('id'))
+                        title = item.get('headline', '')
+                        v_id = str(item.get('id'))
                         if v_id not in history and any(kw in title.lower() for kw in JPN_KEYWORDS):
                             v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                             if v_url: candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
@@ -150,6 +159,7 @@ def main():
     log(f"📊 候補: {len(candidates)}件")
     for video in candidates:
         log(f"🎯 ターゲット: {video['title']}")
+        # 残骸掃除
         for f in [TMP_VIDEO, TMP_SRT, OUT_VIDEO]:
             if os.path.exists(f): os.remove(f)
 
@@ -161,20 +171,20 @@ def main():
         if ai_caption:
             filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
             
-            # MLBかつ有効な字幕データがある場合のみ焼き込み
             if video['type'] == 'mlb' and srt_data and len(srt_data) > 10:
                 with open(TMP_SRT, "w", encoding="utf-8") as sf:
                     sf.write(srt_data)
-                # Linuxで最も安全な指定方法 (相対パス、フォント名修正)
-                filter_complex += f",subtitles={TMP_SRT}:force_style='Fontname=Noto Sans CJK JP,FontSize=13,MarginV=45'"
+                # ファイルが確実に書き込まれるまで一瞬待機
+                time.sleep(1)
+                # 【最重要】./ を付けて相対パスを明示し、Noto Sansフォントを直接指定
+                filter_complex += f",subtitles=./{TMP_SRT}:force_style='Fontname=Noto Sans CJK JP,FontSize=13,MarginV=45'"
                 log("🎨 字幕焼き込みを適用")
 
             # FFmpeg実行
             res = subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', TMP_VIDEO, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', OUT_VIDEO], capture_output=True, text=True)
             
             if not os.path.exists(OUT_VIDEO):
-                log(f"  ❌ FFmpeg出力失敗: {res.stderr}")
-                continue
+                log(f"  ❌ FFmpeg出力失敗"); continue
 
             try:
                 with open(OUT_VIDEO, 'rb') as f:
@@ -188,7 +198,9 @@ def main():
                         creation_id = post_res['id']
                         for _ in range(20):
                             time.sleep(30)
-                            status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json().get('status_code', '').upper()
+                            status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
+                            status = (status_res.get('status_code') or "").upper()
+                            log(f"  ステータス: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 log("🏁 投稿完了！")
