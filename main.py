@@ -8,12 +8,11 @@ from google import genai
 import json
 import re
 
-# リアルタイムログ出力設定
 def log(msg):
     print(f"{msg}")
     sys.stdout.flush()
 
-log("🚀 プレイボール速報・システム最終形態（パス確定 ＋ エラーガード）起動...")
+log("🚀 プレイボール速報・システム最終形態（FFmpegパス ＋ フォント同期）起動...")
 
 # ==========================================
 # 設定・環境変数
@@ -22,11 +21,10 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# 作業ディレクトリの絶対パス取得
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
-TMP_SRT = os.path.join(BASE_DIR, "subtitles.srt")
-OUT_VIDEO = os.path.join(BASE_DIR, "output.mp4")
+# ファイル名は相対パスで統一（FFmpegのパースエラー防止）
+TMP_VIDEO = "temp_video.mp4"
+TMP_SRT = "subtitles.srt"
+OUT_VIDEO = "output.mp4"
 
 client = None
 if GEMINI_API_KEY:
@@ -36,15 +34,14 @@ JPN_KEYWORDS = ["大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由�
 BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "roster", "statcast", "talks"]
 
 def get_stats():
-    path = os.path.join(BASE_DIR, 'stats.json')
-    if os.path.exists(path):
+    if os.path.exists('stats.json'):
         try:
-            with open(path, 'r') as f: return json.load(f)
+            with open('stats.json', 'r') as f: return json.load(f)
         except: pass
     return {"npb": 0, "mlb": 0}
 
 def save_stats(stats):
-    with open(os.path.join(BASE_DIR, 'stats.json'), 'w') as f: json.dump(stats, f)
+    with open('stats.json', 'w') as f: json.dump(stats, f)
 
 def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
@@ -73,7 +70,7 @@ def shift_srt_time(srt_text, offset_sec):
     return "\n".join(cleaned_lines)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
-    log(f"🧠 AI解析開始 (MLBモード: {is_mlb})...")
+    log(f"🧠 AI解析開始...")
     try:
         with open(video_path, 'rb') as f:
             uploaded_file = client.files.upload(file=f, config={'mime_type': 'video/mp4'})
@@ -110,7 +107,7 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         log(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
 
 def main():
-    history_file = os.path.join(BASE_DIR, "history.txt")
+    history_file = "history.txt"
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
@@ -118,16 +115,13 @@ def main():
     if client:
         try:
             for f in client.files.list(): client.files.delete(name=f.name)
-            log("🧹 AIストレージ清掃完了。")
         except: pass
 
-    # 利用可能なモデルの取得
     try:
         models = [m.name for m in client.models.list()]
-        model_name = next((p for p in ["models/gemini-2.0-flash-exp", "models/gemini-1.5-flash", "models/gemini-flash-lite-latest"] if p in models), models[0])
+        model_name = next((p for p in ["models/gemini-2.0-flash-exp", "models/gemini-1.5-flash"] if p in models), models[0])
     except: model_name = "models/gemini-1.5-flash"
 
-    # 探索
     candidates = []
     log("🔍 NPB探索...")
     try:
@@ -136,7 +130,7 @@ def main():
             v_id = str(clip.get('id'))
             if v_id not in history:
                 candidates.append({"title": clip.get('title', ''), "url": clip.get('video_url') or f"https://www3.nhk.or.jp/sports/special/baseball/npb/videos/{v_id}", "id": v_id, "type": "npb", "source": "NHKスポーツ"})
-    except: log("  ⚠️ NHK API失敗")
+    except: pass
 
     log("🔍 MLB探索...")
     for day in [0, 1]:
@@ -147,8 +141,7 @@ def main():
                 for game in date_data.get('games', []):
                     c_res = requests.get(f"https://statsapi.mlb.com/api/v1/game/{game['gamePk']}/content", timeout=10).json()
                     for item in c_res.get('highlights', {}).get('highlights', {}).get('items', []):
-                        title = item.get('headline', '')
-                        v_id = str(item.get('id'))
+                        title = item.get('headline', ''); v_id = str(item.get('id'))
                         if v_id not in history and any(kw in title.lower() for kw in JPN_KEYWORDS):
                             v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
                             if v_url: candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
@@ -157,7 +150,6 @@ def main():
     log(f"📊 候補: {len(candidates)}件")
     for video in candidates:
         log(f"🎯 ターゲット: {video['title']}")
-        # 以前の残骸を削除
         for f in [TMP_VIDEO, TMP_SRT, OUT_VIDEO]:
             if os.path.exists(f): os.remove(f)
 
@@ -168,26 +160,26 @@ def main():
         
         if ai_caption:
             filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-            if video['type'] == 'mlb' and srt_data:
+            
+            # MLBかつ有効な字幕データがある場合のみ焼き込み
+            if video['type'] == 'mlb' and srt_data and len(srt_data) > 10:
                 with open(TMP_SRT, "w", encoding="utf-8") as sf:
                     sf.write(srt_data)
-                    sf.flush()
-                    os.fsync(sf.fileno())
-                # パスをエスケープして指定
-                escaped_srt = TMP_SRT.replace("\\", "/").replace(":", "\\:")
-                filter_complex += f",subtitles='{escaped_srt}':force_style='Fontname=Noto Sans CJK JP Bold,FontSize=13,MarginV=45'"
-                log("🎨 字幕焼き込み準備完了")
+                # Linuxで最も安全な指定方法 (相対パス、フォント名修正)
+                filter_complex += f",subtitles={TMP_SRT}:force_style='Fontname=Noto Sans CJK JP,FontSize=13,MarginV=45'"
+                log("🎨 字幕焼き込みを適用")
 
-            subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', TMP_VIDEO, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', OUT_VIDEO])
+            # FFmpeg実行
+            res = subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', TMP_VIDEO, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', OUT_VIDEO], capture_output=True, text=True)
             
             if not os.path.exists(OUT_VIDEO):
-                log("  ❌ FFmpeg出力失敗"); continue
+                log(f"  ❌ FFmpeg出力失敗: {res.stderr}")
+                continue
 
             try:
-                # Catbox
                 with open(OUT_VIDEO, 'rb') as f:
-                    res = requests.post("https://catbox.moe/user/api.php", data={'reqtype': 'fileupload'}, files={'fileToUpload': f}, timeout=60)
-                    public_url = res.text.strip() if res.status_code == 200 else None
+                    resp = requests.post("https://catbox.moe/user/api.php", data={'reqtype': 'fileupload'}, files={'fileToUpload': f}, timeout=60)
+                    public_url = resp.text.strip() if resp.status_code == 200 else None
                 
                 if public_url and "https://" in public_url:
                     log(f"✅ 公開URL: {public_url}")
@@ -197,13 +189,12 @@ def main():
                         for _ in range(20):
                             time.sleep(30)
                             status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json().get('status_code', '').upper()
-                            log(f"  ステータス: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
                                 log("🏁 投稿完了！")
                                 with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
                                 stats[video['type']] += 1; save_stats(stats); return
-            except Exception as e: log(f"❌ 投稿プロセスエラー: {e}")
+            except Exception as e: log(f"❌ エラー: {e}")
     log("😴 終了。")
 
 if __name__ == "__main__":
