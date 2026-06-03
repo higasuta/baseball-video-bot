@@ -1,16 +1,19 @@
 import sys
-# 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・診断＆投稿システム起動...")
-sys.stdout.flush()
-
+import os
 import requests
 import datetime
-import os
 import time
 import subprocess
 from google import genai
 import json
 import re
+
+# リアルタイムログ出力設定
+def log(msg):
+    print(f"{msg}")
+    sys.stdout.flush()
+
+log("🚀 プレイボール速報・システム最終形態（パス確定 ＋ エラーガード）起動...")
 
 # ==========================================
 # 設定・環境変数
@@ -19,39 +22,29 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
+# 作業ディレクトリの絶対パス取得
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
+TMP_SRT = os.path.join(BASE_DIR, "subtitles.srt")
+OUT_VIDEO = os.path.join(BASE_DIR, "output.mp4")
+
 client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 判定を確実にするため小文字で定義
 JPN_KEYWORDS = ["大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto", "佐々木朗希", "佐々木", "roki sasaki", "sasaki", "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish", "松井裕樹", "松井", "yuki matsui", "matsui", "鈴木誠也", "鈴木", "seiya suzuki", "suzuki", "今永昇太", "今永", "shota imanaga", "imanaga", "千賀滉大", "千賀", "kodai senga", "senga", "菅野智之", "菅野", "tomoyuki sugano", "sugano", "小笠原慎之介", "小笠原", "shinnosuke ogasawara", "ogasawara", "岡本和真", "岡本", "kazuma okamoto", "okamoto", "今井達也", "今井", "tatsuya imai", "imai", "吉田正尚", "吉田", "masataka yoshida", "yoshida", "菊池雄星", "菊池", "yusei kikuchi", "kikuchi", "村上宗隆", "村上", "munetaka murakami", "murakami"]
-
-BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "roster", "alignment", "statcast", "talks"]
+BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "roster", "statcast", "talks"]
 
 def get_stats():
-    if os.path.exists('stats.json'):
+    path = os.path.join(BASE_DIR, 'stats.json')
+    if os.path.exists(path):
         try:
-            with open('stats.json', 'r') as f: return json.load(f)
+            with open(path, 'r') as f: return json.load(f)
         except: pass
     return {"npb": 0, "mlb": 0}
 
 def save_stats(stats):
-    with open('stats.json', 'w') as f: json.dump(stats, f)
-
-def cleanup_gemini_storage():
-    try:
-        for f in client.files.list(): client.files.delete(name=f.name)
-        print("🧹 AIストレージの掃除完了。")
-    except: pass
-
-def get_available_flash_model():
-    try:
-        models = [m.name for m in client.models.list()]
-        priority = ["models/gemini-2.0-flash-exp", "models/gemini-1.5-flash", "models/gemini-flash-lite-latest"]
-        for p in priority:
-            if p in models: return p
-        return models[0]
-    except: return "models/gemini-1.5-flash"
+    with open(os.path.join(BASE_DIR, 'stats.json'), 'w') as f: json.dump(stats, f)
 
 def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
@@ -68,14 +61,25 @@ def shift_srt_time(srt_text, offset_sec):
         new_m, rem = divmod(rem, 60000)
         new_s, new_ms = divmod(rem, 1000)
         return f"{new_h:02}:{new_m:02}:{new_s:02},{new_ms:03}"
-    return re.sub(r'(\d{2}:\d{2}:\d{2},\d{3})', shift_match, srt_text)
+    
+    shifted_text = re.sub(r'(\d{2}:\d{2}:\d{2},\d{3})', shift_match, srt_text)
+    cleaned_lines = []
+    for line in shifted_text.splitlines():
+        if "-->" in line or line.strip().isdigit():
+            cleaned_lines.append(line)
+        else:
+            line = re.sub(r'^(English|Original|Transcript|Source|原文|英語|日本語)[:：]\s*', '', line, flags=re.IGNORECASE)
+            if is_japanese(line): cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
-    print(f"🧠 AI解析開始...")
+    log(f"🧠 AI解析開始 (MLBモード: {is_mlb})...")
     try:
         with open(video_path, 'rb') as f:
             uploaded_file = client.files.upload(file=f, config={'mime_type': 'video/mp4'})
-        while uploaded_file.state.name == "PROCESSING": time.sleep(2); uploaded_file = client.files.get(name=uploaded_file.name)
+        while uploaded_file.state.name == "PROCESSING":
+            time.sleep(2)
+            uploaded_file = client.files.get(name=uploaded_file.name)
         
         subtitle_instruction = ""
         if is_mlb:
@@ -103,31 +107,39 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         else: ai_caption = "\n".join(lines)
         return start_sec, ai_caption, srt_data
     except Exception as e:
-        print(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
+        log(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
 
 def main():
-    history_file = "history.txt"
+    history_file = os.path.join(BASE_DIR, "history.txt")
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     stats = get_stats()
-    cleanup_gemini_storage()
-    model_name = get_available_flash_model()
-    
-    print("🔍 NPB探索...")
+    if client:
+        try:
+            for f in client.files.list(): client.files.delete(name=f.name)
+            log("🧹 AIストレージ清掃完了。")
+        except: pass
+
+    # 利用可能なモデルの取得
+    try:
+        models = [m.name for m in client.models.list()]
+        model_name = next((p for p in ["models/gemini-2.0-flash-exp", "models/gemini-1.5-flash", "models/gemini-flash-lite-latest"] if p in models), models[0])
+    except: model_name = "models/gemini-1.5-flash"
+
+    # 探索
     candidates = []
+    log("🔍 NPB探索...")
     try:
         res = requests.get("https://www3.nhk.or.jp/sports/json/pro-baseball/index.json", timeout=15).json()
         for clip in res.get('clips', []):
-            title = clip.get('title', '')
             v_id = str(clip.get('id'))
-            if v_id not in history and not any(kw in title.lower() for kw in BLACK_KEYWORDS):
-                v_url = clip.get('video_url') or f"https://www3.nhk.or.jp/sports/special/baseball/npb/videos/{v_id}"
-                candidates.append({"title": title, "url": v_url, "id": v_id, "type": "npb", "source": "NHKスポーツ"})
-    except: print("  ⚠️ NHK API取得失敗")
+            if v_id not in history:
+                candidates.append({"title": clip.get('title', ''), "url": clip.get('video_url') or f"https://www3.nhk.or.jp/sports/special/baseball/npb/videos/{v_id}", "id": v_id, "type": "npb", "source": "NHKスポーツ"})
+    except: log("  ⚠️ NHK API失敗")
 
-    print("🔍 MLB探索...")
-    for day in [0, 1, 2]:
+    log("🔍 MLB探索...")
+    for day in [0, 1]:
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day)).strftime('%Y-%m-%d')
         try:
             res = requests.get(f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}", timeout=15).json()
@@ -142,47 +154,57 @@ def main():
                             if v_url: candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
         except: continue
 
-    print(f"📊 投稿候補: {len(candidates)}件")
-    if not candidates: return
+    log(f"📊 候補: {len(candidates)}件")
+    for video in candidates:
+        log(f"🎯 ターゲット: {video['title']}")
+        # 以前の残骸を削除
+        for f in [TMP_VIDEO, TMP_SRT, OUT_VIDEO]:
+            if os.path.exists(f): os.remove(f)
 
-    # 1件目を処理
-    video = candidates[0]
-    print(f"🎯 実行: {video['title']}")
-    temp_input = "temp_video.mp4"
-    subprocess.run(['yt-dlp', '-o', temp_input, '--quiet', video['url']])
-    
-    if os.path.exists(temp_input):
-        start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], model_name, is_mlb=(video['type'] == 'mlb'))
+        subprocess.run(['yt-dlp', '-o', TMP_VIDEO, '--quiet', video['url']])
+        if not os.path.exists(TMP_VIDEO): continue
+
+        start_sec, ai_caption, srt_data = analyze_video_with_ai(TMP_VIDEO, video['title'], video['source'], model_name, is_mlb=(video['type'] == 'mlb'))
+        
         if ai_caption:
-            output_file = "output.mp4"
             filter_complex = "scale=1134:-2,crop=1080:ih,pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
             if video['type'] == 'mlb' and srt_data:
-                with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
-                filter_complex += ",subtitles=subtitles.srt:force_style='Fontname=Noto Sans CJK JP Bold,FontSize=13,MarginV=45'"
+                with open(TMP_SRT, "w", encoding="utf-8") as sf:
+                    sf.write(srt_data)
+                    sf.flush()
+                    os.fsync(sf.fileno())
+                # パスをエスケープして指定
+                escaped_srt = TMP_SRT.replace("\\", "/").replace(":", "\\:")
+                filter_complex += f",subtitles='{escaped_srt}':force_style='Fontname=Noto Sans CJK JP Bold,FontSize=13,MarginV=45'"
+                log("🎨 字幕焼き込み準備完了")
+
+            subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', TMP_VIDEO, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', OUT_VIDEO])
             
-            subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
-            
-            # アップロードと投稿
+            if not os.path.exists(OUT_VIDEO):
+                log("  ❌ FFmpeg出力失敗"); continue
+
             try:
-                # Catboxアップロード
-                with open(output_file, 'rb') as f:
+                # Catbox
+                with open(OUT_VIDEO, 'rb') as f:
                     res = requests.post("https://catbox.moe/user/api.php", data={'reqtype': 'fileupload'}, files={'fileToUpload': f}, timeout=60)
                     public_url = res.text.strip() if res.status_code == 200 else None
                 
-                if public_url:
+                if public_url and "https://" in public_url:
+                    log(f"✅ 公開URL: {public_url}")
                     post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                     if 'id' in post_res:
                         creation_id = post_res['id']
                         for _ in range(20):
                             time.sleep(30)
                             status = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json().get('status_code', '').upper()
+                            log(f"  ステータス: {status}")
                             if status == 'FINISHED':
                                 requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
-                                print("🏁 投稿完了！")
+                                log("🏁 投稿完了！")
                                 with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
-                                stats[video['type']] += 1; save_stats(stats); break
-            except Exception as e: print(f"❌ 投稿エラー: {e}")
-    print("😴 終了。")
+                                stats[video['type']] += 1; save_stats(stats); return
+            except Exception as e: log(f"❌ 投稿プロセスエラー: {e}")
+    log("😴 終了。")
 
 if __name__ == "__main__":
     main()
