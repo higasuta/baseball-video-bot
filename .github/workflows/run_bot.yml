@@ -2,14 +2,12 @@ name: MLB Playball Bot (Cloud Auto)
 
 on:
   schedule:
-    - cron: '*/10 * * * *' # 10分おき
-  workflow_dispatch: # 手動実行ボタン
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-mlb-bot:
     runs-on: ubuntu-latest
-    
-    # 403エラーを回避するための書き込み権限許可
     permissions:
       contents: write
 
@@ -17,7 +15,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # FFmpegと日本語フォントの強制インストール
       - name: Install FFmpeg and Japanese Fonts
         run: |
           sudo apt-get update
@@ -28,12 +25,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 最新のSDKとyt-dlpをインストール
       - name: Install Dependencies
         run: |
-          pip install -U requests google-genai yt-dlp
+          pip install -U requests google-generativeai yt-dlp
 
-      # メインスクリプトの実行
       - name: Run Bot
         env:
           INSTA_BUSINESS_ID: ${{ secrets.INSTA_BUSINESS_ID }}
@@ -42,14 +37,11 @@ jobs:
           TEST_MODE: false
         run: python main.py
 
-      # 不要な動画ファイルを削除し、履歴と統計のみをPush
       - name: Commit and Push Changes
         run: |
           git config --local user.email "bot@example.com"
           git config --local user.name "PlayballBot"
-          # 動画・字幕ファイルをGitに含めないよう削除
           rm -f temp_video.mp4 output.mp4 subtitles.srt
-          # 変更がある場合のみPush
           git add history.txt stats.json
-          git commit -m "Update history and stats [skip ci]" || echo "No changes to commit"
+          git commit -m "Update history [skip ci]" || echo "No changes"
           git push origin main
