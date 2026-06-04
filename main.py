@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（ラベル抹殺 ＋ ハッシュタグ強化）起動...")
+print("🚀 プレイボール速報・システム最終形態（字幕構造修復 ＋ 物理同期）起動...")
 sys.stdout.flush()
 
 import requests
@@ -54,9 +54,10 @@ def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
 
 def shift_srt_time(srt_text, offset_sec):
+    """SRTをブロック単位で解析。日本語がないブロックを丸ごと排除し、時間を補正する"""
     correction = offset_sec + 0.5 
-    def shift_match(match):
-        time_str = match.group(1)
+
+    def shift_timestamp(time_str):
         h, m, s_ms = time_str.split(':')
         s, ms = s_ms.split(',')
         total_ms = (int(h)*3600 + int(m)*60 + int(s)) * 1000 + int(ms)
@@ -65,15 +66,43 @@ def shift_srt_time(srt_text, offset_sec):
         new_m, rem = divmod(rem, 60000)
         new_s, new_ms = divmod(rem, 1000)
         return f"{new_h:02}:{new_m:02}:{new_s:02},{new_ms:03}"
-    shifted_text = re.sub(r'(\d{2}:\d{2}:\d{2},\d{3})', shift_match, srt_text)
-    cleaned_lines = []
-    for line in shifted_text.splitlines():
-        if "-->" in line or line.strip().isdigit():
-            cleaned_lines.append(line)
-        else:
-            line = re.sub(r'^(English|Original|原文|英語|日本語)[:：]\s*', '', line, flags=re.IGNORECASE)
-            if is_japanese(line): cleaned_lines.append(line)
-    return "\n".join(cleaned_lines)
+
+    # ブロックごとに分割（空行で区切る）
+    blocks = re.split(r'\n\s*\n', srt_text.strip())
+    final_blocks = []
+    
+    for block in blocks:
+        lines = block.strip().splitlines()
+        if len(lines) < 3: continue # 番号、時間、テキストの3行がない場合は無視
+        
+        # タイムライン行(例: 00:00:01,000 --> 00:00:03,000)を特定
+        time_line_idx = -1
+        for i, line in enumerate(lines):
+            if "-->" in line:
+                time_line_idx = i
+                break
+        
+        if time_line_idx == -1: continue
+        
+        # テキスト部分を抽出してクリーニング
+        text_lines = lines[time_line_idx + 1:]
+        full_text = " ".join(text_lines)
+        # ラベル削除
+        full_text = re.sub(r'^(English|Original|原文|英語|日本語)[:：]\s*', '', full_text, flags=re.IGNORECASE)
+        
+        # 日本語が含まれている場合のみ、時間をずらして採用
+        if is_japanese(full_text):
+            try:
+                times = lines[time_line_idx].split(' --> ')
+                start_t = shift_timestamp(times[0].strip())
+                end_t = shift_timestamp(times[1].strip())
+                
+                new_idx = len(final_blocks) + 1
+                final_blocks.append(f"{new_idx}\n{start_t} --> {end_t}\n{full_text.strip()}")
+            except:
+                continue # パース失敗時はスキップ
+                
+    return "\n\n".join(final_blocks)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
     print(f"🧠 AIによる動画解析中...")
@@ -86,7 +115,6 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         if is_mlb:
             subtitle_prompt = "また、英語実況を完璧に聞き取り日本語SRT字幕を作成せよ。日本語のみ出力。絶対同期。[SRT_START]...[SRT_END]で囲め。"
 
-        # 【修正】ハッシュタグを強制し、ラベル出力を厳禁するプロンプト
         prompt = f"""
         野球動画({title})を解析し、以下を出力せよ。
         [数値1つ(開始秒数)]
@@ -97,7 +125,7 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         1. 見出し、要約、所感（だ・である調）の順で書け。
         2. 野球関連のハッシュタグを30個必ず含めろ。
         3. 最後に 引用：{source_account} を入れろ。
-        4. 「見出し：」「###」などのラベルやMarkdown装飾は一切出力するな。本文のみをいきなり書け。
+        4. 「見出し：」「###」などのラベルやMarkdown装飾は一切出力するな。
         """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
@@ -110,7 +138,7 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
                 srt_data = srt_match.group(1).strip()
                 res_text = res_text.replace(srt_match.group(0), "")
 
-        # 【修正】ラベル抹殺フィルターの強化（#や*が連続していても消去）
+        # ラベル抹殺
         clean_text = re.sub(r'(?i)(#+|\*+)?(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)(#+|\*+)?[:：]?\s*', '', res_text).strip()
         
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
@@ -129,6 +157,7 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
     except Exception as e:
         print(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
 
+# --- get_npb_video, get_mlb_video は変更なし ---
 def get_npb_video(history):
     url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     candidates = []
