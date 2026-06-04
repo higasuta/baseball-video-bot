@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（キャプション完全クリーン化）起動...")
+print("🚀 プレイボール速報・システム最終形態（ラベル抹殺 ＋ ハッシュタグ強化）起動...")
 sys.stdout.flush()
 
 import requests
@@ -65,7 +65,6 @@ def shift_srt_time(srt_text, offset_sec):
         new_m, rem = divmod(rem, 60000)
         new_s, new_ms = divmod(rem, 1000)
         return f"{new_h:02}:{new_m:02}:{new_s:02},{new_ms:03}"
-
     shifted_text = re.sub(r'(\d{2}:\d{2}:\d{2},\d{3})', shift_match, srt_text)
     cleaned_lines = []
     for line in shifted_text.splitlines():
@@ -87,23 +86,32 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         if is_mlb:
             subtitle_prompt = "また、英語実況を完璧に聞き取り日本語SRT字幕を作成せよ。日本語のみ出力。絶対同期。[SRT_START]...[SRT_END]で囲め。"
 
-        prompt = f"野球動画({title})を解析し、以下を出力せよ。[数値1つ(開始秒数)] [本文] {subtitle_prompt} 【ルール】見出し、要約、所感。START: 等のラベル禁止。引用：{source_account} を最後に。"
+        # 【修正】ハッシュタグを強制し、ラベル出力を厳禁するプロンプト
+        prompt = f"""
+        野球動画({title})を解析し、以下を出力せよ。
+        [数値1つ(開始秒数)]
+        [本文]
+        {subtitle_prompt}
+
+        【本文ルール】
+        1. 見出し、要約、所感（だ・である調）の順で書け。
+        2. 野球関連のハッシュタグを30個必ず含めろ。
+        3. 最後に 引用：{source_account} を入れろ。
+        4. 「見出し：」「###」などのラベルやMarkdown装飾は一切出力するな。本文のみをいきなり書け。
+        """
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
 
-        # 1. 字幕データ(SRT)の抽出と削除（本文に残さない）
         srt_data = None
         if is_mlb:
             srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
             if srt_match:
                 srt_data = srt_match.group(1).strip()
-                # 本文からSRTブロックを物理的に削除
                 res_text = res_text.replace(srt_match.group(0), "")
 
-        # 2. 本文から不要なラベル・Markdownを物理抹殺
-        # 見出し、要約、所感、**見出し**、START: などをすべて消去
-        clean_text = re.sub(r'(?i)(\*\*|#)?(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)(\*\*|#)?[:：]\s*', '', res_text).strip()
+        # 【修正】ラベル抹殺フィルターの強化（#や*が連続していても消去）
+        clean_text = re.sub(r'(?i)(#+|\*+)?(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)(#+|\*+)?[:：]?\s*', '', res_text).strip()
         
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         if not lines: return 0, None, None
@@ -121,7 +129,6 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
     except Exception as e:
         print(f"  ⚠️ AI解析失敗: {e}"); return 0, None, None
 
-# --- get_npb_video, get_mlb_video は変更なし ---
 def get_npb_video(history):
     url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     candidates = []
