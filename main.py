@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（字幕強制生成 ＋ ログ透明化）起動...")
+print("🚀 プレイボール速報・システム最終形態（日付バグ修正 ＋ 字幕強制）起動...")
 sys.stdout.flush()
 
 import requests
@@ -88,7 +88,6 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         model = genai.GenerativeModel(model_name)
         
-        # 字幕指示の徹底強化
         sub_prompt = """
         【最優先タスク】
         動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。
@@ -137,7 +136,6 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
     except Exception as e:
         print(f"  ⚠️ AI失敗: {e}"); return 0, None, None
 
-# --- get_npb_video, get_mlb_video は変更なし ---
 def get_npb_video(history):
     url = "https://www3.nhk.or.jp/sports/json/pro-baseball/index.json"
     candidates = []
@@ -153,7 +151,8 @@ def get_npb_video(history):
 def get_mlb_video(history, is_test_mode):
     candidates = []
     for day_offset in [0, 1]:
-        date_str = (datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
+        # 【修正】timedeltaの計算ミスを修正
+        date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
             res = requests.get(url, timeout=15).json()
