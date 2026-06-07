@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（字幕可視化 ＋ 位置最適化）起動...")
+print("🚀 プレイボール速報・システム最終形態（字幕強制生成 ＋ ログ透明化）起動...")
 sys.stdout.flush()
 
 import requests
@@ -54,7 +54,6 @@ def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
 
 def shift_srt_time(srt_text, offset_sec):
-    """SRT構造を維持しつつ時間を物理補正"""
     correction = offset_sec + 0.5 
     def shift_timestamp(time_str):
         h, m, s_ms = time_str.split(':')
@@ -83,13 +82,31 @@ def shift_srt_time(srt_text, offset_sec):
     return "\n\n".join(final_blocks)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=False):
-    print(f"🧠 AI解析中...")
+    print(f"🧠 AI解析中 (MLB:{is_mlb})...")
     try:
         video_file = genai.upload_file(path=video_path)
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         model = genai.GenerativeModel(model_name)
-        sub_prompt = "また、英語実況を日本語SRTにせよ。日本語のみ出力。絶対同期。[SRT_START]...[SRT_END]で囲め。" if is_mlb else ""
-        prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)] [本文] {sub_prompt} 【ルール】ラベルや###禁止。ハッシュタグ30個必須。引用：{source_account}"
+        
+        # 字幕指示の徹底強化
+        sub_prompt = """
+        【最優先タスク】
+        動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。
+        ・開始秒数は 00:00:00,000 から正確に打て。
+        ・日本語のみ出力し、英語の原文は絶対に混ぜるな。
+        ・必ず [SRT_START] と [SRT_END] のタグで囲んで出力せよ。
+        """ if is_mlb else ""
+
+        prompt = f"""
+        野球動画({title})を解析し、以下を出力せよ。
+        [数値1つ(開始秒数)]
+        [本文]
+        {sub_prompt}
+        
+        【本文ルール】
+        ・ラベル(見出し:等)やMarkdown(###等)は一切禁止。本文のみ書け。
+        ・ハッシュタグ30個必須。引用：{source_account} を最後に。
+        """
         
         response = model.generate_content([prompt, video_file])
         res_text = response.text
@@ -101,6 +118,9 @@ def analyze_video_with_ai(video_path, title, source_account, model_name, is_mlb=
             if srt_match:
                 srt_data = srt_match.group(1).strip()
                 res_text = res_text.replace(srt_match.group(0), "")
+                print(f"✅ 字幕データの抽出に成功しました ({len(srt_data)}文字)")
+            else:
+                print("⚠️ AIが字幕タグ [SRT_START] を出力しませんでした。")
 
         clean_text = re.sub(r'(?i)(#+|\*+)?(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)(#+|\*+)?[:：]?\s*', '', res_text).strip()
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
@@ -126,7 +146,6 @@ def get_npb_video(history):
         for clip in clips:
             v_id = str(clip.get('id'))
             if v_id not in history:
-                if any(kw in clip.get('title','').lower() for kw in BLACK_KEYWORDS): continue
                 candidates.append({"title": clip.get('title',''), "url": clip.get('video_url') or f"https://www3.nhk.or.jp/sports/special/baseball/npb/videos/{v_id}", "id": v_id, "type": "npb", "source": "NHKスポーツ"})
         return candidates
     except: return []
@@ -134,7 +153,7 @@ def get_npb_video(history):
 def get_mlb_video(history, is_test_mode):
     candidates = []
     for day_offset in [0, 1]:
-        date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
+        date_str = (datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
             res = requests.get(url, timeout=15).json()
@@ -175,17 +194,12 @@ def main():
         start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model, is_mlb=(video['type'] == 'mlb'))
         if ai_caption is None: continue
 
-        # 【重要】フィルター順序の再構築
-        # 1. スケール/クロップ(1080幅へ) -> 2. 字幕焼き込み -> 3. パディング(1920高さへ)
         video_filters = "scale=1134:-2,crop=1080:ih"
-        
         if video['type'] == 'mlb' and srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
-            # 映像コンテンツの下部に配置（MarginV=20）
             video_filters += ",subtitles=subtitles.srt:force_style='Fontname=Noto Sans CJK JP,FontSize=22,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=4,Outline=0,MarginV=20'"
             print("🎨 字幕を映像内に焼き込み中...")
 
-        # 最後に黒帯を付けて9:16化
         filter_complex = f"{video_filters},pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
 
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', 'output.mp4'])
