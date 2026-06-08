@@ -27,7 +27,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install -U requests google-generativeai yt-dlp
+          # ✅ google-genai (最新SDK) をインストールするように修正
+          pip install -U requests google-genai yt-dlp
 
       - name: Run Bot
         env:
