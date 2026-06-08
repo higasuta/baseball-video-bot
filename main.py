@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（SRT構造修復 ＋ 同期修正）起動...")
+print("🚀 プレイボール速報・システム最終形態（本文復活 ＋ 精密ラベル抹殺）起動...")
 sys.stdout.flush()
 
 import requests
@@ -54,12 +54,8 @@ def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
 
 def shift_srt_time(srt_text, offset_sec):
-    """SRTを物理的に解体し、構造を正しく再構築して時間を補正する"""
-    # AIの認識ラグ(0.8s) + 動画の切り出し位置
     correction = offset_sec + 0.8
-
     def shift_timestamp(time_str):
-        # 00:00:00,000 形式をパースして計算
         h, m, s_ms = time_str.split(':')
         s, ms = s_ms.split(',')
         total_ms = (int(h)*3600 + int(m)*60 + int(s)) * 1000 + int(ms)
@@ -69,27 +65,19 @@ def shift_srt_time(srt_text, offset_sec):
         new_s, new_ms = divmod(rem, 1000)
         return f"{new_h:02}:{new_m:02}:{new_s:02},{new_ms:03}"
 
-    # 構造を破壊せずブロックを抽出する最強の正規表現
-    # インデックス番号、時間、テキストを1セットで捕まえる
     pattern = r"(\d+)\s*\n(\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3})\s*\n(.*?)(?=\n\d+\s*\n\d{2}:\d{2}:\d{2},\d{3}|$)"
     matches = re.findall(pattern, srt_text, re.DOTALL)
-    
     final_blocks = []
     for i, match in enumerate(matches):
         _, time_line, text_content = match
         text_content = text_content.strip()
-        
-        # クリーニング（日本語か重要単語が含まれる場合のみ採用）
         if is_japanese(text_content) or any(w in text_content.upper() for w in ["MLB", "HR", "MVP", "OUT"]):
             try:
                 times = time_line.split(' --> ')
                 start_t = shift_timestamp(times[0].strip())
                 end_t = shift_timestamp(times[1].strip())
-                
-                # 正しいSRT形式で再構築（必ず空行を挟む）
                 final_blocks.append(f"{len(final_blocks)+1}\n{start_t} --> {end_t}\n{text_content}")
             except: continue
-                
     return "\n\n".join(final_blocks)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
@@ -101,29 +89,43 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         
         sub_prompt = """
         動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。
-        ・開始秒数は 00:00:00,000 から打て。
         ・日本語のみ出力し、必ず [SRT_START] と [SRT_END] で囲め。
         """
 
-        prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)] [本文] {sub_prompt} 【ルール】ラベルや###禁止。ハッシュタグ30個必須。引用：{source_account}"
+        prompt = f"""
+        野球動画({title})を解析し、以下を出力せよ。
+        1行目：数値1つ(開始秒数)のみ
+        2行目以降：動画の解説本文（見出し、要約、所感を「だ・である」調で詳しく）
+        最後：野球関連のハッシュタグ30個
+
+        【ルール】
+        ・「見出し：」「要約：」といったラベルや「###」「**」などの装飾は一切書くな。
+        ・解説本文は必ず200文字以上詳しく書け。
+        ・{sub_prompt}
+        ・最後に 引用：{source_account} を入れろ。
+        """
         
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
 
+        # 1. 字幕データの抽出と削除
         srt_raw = None
         srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
         if srt_match:
             srt_raw = srt_match.group(1).strip()
             res_text = res_text.replace(srt_match.group(0), "")
 
-        # 本文クリーンアップ
-        clean_text = re.sub(r'(?i)(#+|\*+)?(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)(#+|\*+)?[:：]?\s*', '', res_text).strip()
+        # 2. ラベル・装飾の物理抹殺（行頭にあるものだけを消す）
+        clean_text = re.sub(r'(?im)^(\*\*|#|###)?\s*(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)\s*[:：]?\s*', '', res_text).strip()
+        
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         if not lines: return 0, None, None
         
+        # 3. 開始秒数と本文の分離
         start_sec = 0
-        match = re.search(r"(\d+)", lines[0])
+        first_line = lines[0]
+        match = re.search(r"(\d+)", first_line)
         if match:
             start_sec = int(match.group(1))
             ai_caption = "\n".join(lines[1:])
@@ -182,7 +184,6 @@ def main():
         video_filters = "scale=1134:-2,crop=1080:ih"
         if srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
-            # 正しいフィルター順序: 字幕焼き込み ➔ pad(黒帯)
             video_filters += ",subtitles=./subtitles.srt:force_style='Fontname=Noto Sans CJK JP,FontSize=22,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=4,Outline=0,MarginV=20'"
             print("🎨 字幕構造を修復して焼き込み中...")
 
