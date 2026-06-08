@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・MLB自動翻訳システム（同期精度 修正版）起動...")
+print("🚀 プレイボール速報・システム最終形態（SRT構造修復 ＋ 同期修正）起動...")
 sys.stdout.flush()
 
 import requests
@@ -54,11 +54,12 @@ def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
 
 def shift_srt_time(srt_text, offset_sec):
-    """SRTをブロック単位で解析し、物理同期（0.8秒先行）を行う"""
-    # AIの認識遅延 0.8秒 + 動画の切り出し秒数
-    correction = offset_sec + 0.8 
+    """SRTを物理的に解体し、構造を正しく再構築して時間を補正する"""
+    # AIの認識ラグ(0.8s) + 動画の切り出し位置
+    correction = offset_sec + 0.8
 
     def shift_timestamp(time_str):
+        # 00:00:00,000 形式をパースして計算
         h, m, s_ms = time_str.split(':')
         s, ms = s_ms.split(',')
         total_ms = (int(h)*3600 + int(m)*60 + int(s)) * 1000 + int(ms)
@@ -68,24 +69,27 @@ def shift_srt_time(srt_text, offset_sec):
         new_s, new_ms = divmod(rem, 1000)
         return f"{new_h:02}:{new_m:02}:{new_s:02},{new_ms:03}"
 
-    blocks = re.split(r'\n\s*\n', srt_text.strip())
+    # 構造を破壊せずブロックを抽出する最強の正規表現
+    # インデックス番号、時間、テキストを1セットで捕まえる
+    pattern = r"(\d+)\s*\n(\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3})\s*\n(.*?)(?=\n\d+\s*\n\d{2}:\d{2}:\d{2},\d{3}|$)"
+    matches = re.findall(pattern, srt_text, re.DOTALL)
+    
     final_blocks = []
-    for block in blocks:
-        lines = block.strip().splitlines()
-        if len(lines) < 3: continue
-        time_line = next((l for l in lines if "-->" in l), None)
-        if not time_line: continue
-        text_content = " ".join(lines[lines.index(time_line)+1:])
+    for i, match in enumerate(matches):
+        _, time_line, text_content = match
+        text_content = text_content.strip()
         
-        # クリーニング: 日本語が含まれているブロックのみ採用
+        # クリーニング（日本語か重要単語が含まれる場合のみ採用）
         if is_japanese(text_content) or any(w in text_content.upper() for w in ["MLB", "HR", "MVP", "OUT"]):
             try:
                 times = time_line.split(' --> ')
                 start_t = shift_timestamp(times[0].strip())
                 end_t = shift_timestamp(times[1].strip())
-                new_idx = len(final_blocks) + 1
-                final_blocks.append(f"{new_idx}\n{start_t} --> {end_t}\n{text_content.strip()}")
+                
+                # 正しいSRT形式で再構築（必ず空行を挟む）
+                final_blocks.append(f"{len(final_blocks)+1}\n{start_t} --> {end_t}\n{text_content}")
             except: continue
+                
     return "\n\n".join(final_blocks)
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
@@ -107,14 +111,13 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         res_text = response.text
         genai.delete_file(video_file.name)
 
-        # 字幕データの抽出（ここではまだshiftしない）
         srt_raw = None
         srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
         if srt_match:
             srt_raw = srt_match.group(1).strip()
             res_text = res_text.replace(srt_match.group(0), "")
 
-        # 本文のクリーニング
+        # 本文クリーンアップ
         clean_text = re.sub(r'(?i)(#+|\*+)?(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)(#+|\*+)?[:：]?\s*', '', res_text).strip()
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         if not lines: return 0, None, None
@@ -124,7 +127,6 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         if match:
             start_sec = int(match.group(1))
             ai_caption = "\n".join(lines[1:])
-            # ✅ ここで1回だけ、start_secに基づいた同期補正を行う
             srt_data = shift_srt_time(srt_raw, start_sec) if srt_raw else None
         else:
             ai_caption = "\n".join(lines)
@@ -166,9 +168,7 @@ def main():
     cleanup_gemini_storage()
     flash_model = get_available_flash_model()
     candidates = get_mlb_video(history)
-    if not candidates:
-        print("😴 MLB新着なし。")
-        return
+    if not candidates: return
     
     for video in candidates:
         print(f"🎯 ターゲット確定: {video['title']}")
@@ -182,8 +182,9 @@ def main():
         video_filters = "scale=1134:-2,crop=1080:ih"
         if srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
+            # 正しいフィルター順序: 字幕焼き込み ➔ pad(黒帯)
             video_filters += ",subtitles=./subtitles.srt:force_style='Fontname=Noto Sans CJK JP,FontSize=22,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=4,Outline=0,MarginV=20'"
-            print("🎨 字幕シンクロ補正を適用して焼き込み中...")
+            print("🎨 字幕構造を修復して焼き込み中...")
 
         filter_complex = f"{video_filters},pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', 'output.mp4'])
