@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（本文復活 ＋ 精密ラベル抹殺）起動...")
+print("🚀 プレイボール速報・システム最終形態（クリーンキャプション ＋ 自動コメント）起動...")
 sys.stdout.flush()
 
 import requests
@@ -22,7 +22,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-JPN_KEYWORDS = ["大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto", "佐々木朗希", "佐々木", "roki sasaki", "sasaki", "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish", "村上宗隆", "村上", "munetaka murakami", "murakami"]
+JPN_KEYWORDS = ["大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto", "佐々木朗希", "佐々木", "roki sasaki", "sasaki", "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish", "村上宗隆", "村上", "munetaka murakami", "murakami", "鈴木誠也", "seiya suzuki", "今永昇太", "shota imanaga", "吉田正尚", "masataka yoshida"]
 BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights", "outing", "talks", "roberts", "manager"]
 
 def get_stats():
@@ -80,6 +80,19 @@ def shift_srt_time(srt_text, offset_sec):
             except: continue
     return "\n\n".join(final_blocks)
 
+def post_automated_comment(media_id):
+    """【新機能】投稿直後のコメント欄にメッセージを投稿"""
+    message = "プロフィールのリンクも見てってね！"
+    url = f"https://graph.facebook.com/v21.0/{media_id}/comments"
+    try:
+        res = requests.post(url, data={'message': message, 'access_token': ACCESS_TOKEN}).json()
+        if 'id' in res:
+            print(f"💬 コメントを投稿しました: {message}")
+            return True
+    except Exception as e:
+        print(f"⚠️ コメント投稿失敗: {e}")
+    return False
+
 def analyze_video_with_ai(video_path, title, source_account, model_name):
     print(f"🧠 AI解析中...")
     try:
@@ -87,48 +100,29 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         model = genai.GenerativeModel(model_name)
         
-        sub_prompt = """
-        動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。
-        ・日本語のみ出力し、必ず [SRT_START] と [SRT_END] で囲め。
-        """
-
-        prompt = f"""
-        野球動画({title})を解析し、以下を出力せよ。
-        1行目：数値1つ(開始秒数)のみ
-        2行目以降：動画の解説本文（見出し、要約、所感を「だ・である」調で詳しく）
-        最後：野球関連のハッシュタグ30個
-
-        【ルール】
-        ・「見出し：」「要約：」といったラベルや「###」「**」などの装飾は一切書くな。
-        ・解説本文は必ず200文字以上詳しく書け。
-        ・{sub_prompt}
-        ・最後に 引用：{source_account} を入れろ。
-        """
+        sub_prompt = "動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。日本語のみ出力し、必ず [SRT_START] と [SRT_END] で囲め。"
+        prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)] [本文] {sub_prompt} 【ルール】ラベルや###禁止。ハッシュタグ30個。引用：{source_account}"
         
         response = model.generate_content([prompt, video_file])
         res_text = response.text
         genai.delete_file(video_file.name)
 
-        # 1. 字幕データの抽出と削除
         srt_raw = None
         srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
         if srt_match:
             srt_raw = srt_match.group(1).strip()
             res_text = res_text.replace(srt_match.group(0), "")
 
-        # 2. ラベル・装飾の物理抹殺（行頭にあるものだけを消す）
         clean_text = re.sub(r'(?im)^(\*\*|#|###)?\s*(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)\s*[:：]?\s*', '', res_text).strip()
-        
         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
         if not lines: return 0, None, None
         
-        # 3. 開始秒数と本文の分離
         start_sec = 0
-        first_line = lines[0]
-        match = re.search(r"(\d+)", first_line)
+        match = re.search(r"(\d+)", lines[0])
         if match:
             start_sec = int(match.group(1))
             ai_caption = "\n".join(lines[1:])
+            # ✅ キャプションへの余計な誘導文は追加せず、クリーンに保つ
             srt_data = shift_srt_time(srt_raw, start_sec) if srt_raw else None
         else:
             ai_caption = "\n".join(lines)
@@ -153,11 +147,10 @@ def get_mlb_video(history):
                         highlights = content.get('highlights', {}).get('highlights', {}).get('items', [])
                         for item in highlights:
                             title = item.get('headline', ''); v_id = str(item.get('id'))
-                            v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
-                            if v_url and v_id not in history:
-                                if any(kw in title.lower() for kw in JPN_KEYWORDS):
-                                    if not any(bk in title.lower() for bk in BLACK_KEYWORDS):
-                                        candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
+                            if v_id not in history and any(kw in title.lower() for kw in JPN_KEYWORDS):
+                                if not any(bk in title.lower() for bk in BLACK_KEYWORDS):
+                                    v_url = next((p['url'] for p in item['playbacks'] if p['name'] == 'mp4Avc'), None)
+                                    if v_url: candidates.append({"title": title, "url": v_url, "id": v_id, "type": "mlb", "source": "@MLBJapan"})
                     except: continue
         except: continue
     return candidates
@@ -185,7 +178,6 @@ def main():
         if srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
             video_filters += ",subtitles=./subtitles.srt:force_style='Fontname=Noto Sans CJK JP,FontSize=22,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=4,Outline=0,MarginV=20'"
-            print("🎨 字幕構造を修復して焼き込み中...")
 
         filter_complex = f"{video_filters},pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
         subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', 'output.mp4'])
@@ -203,10 +195,16 @@ def main():
                                 time.sleep(30)
                                 status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
                                 if (status_res.get('status_code') or "").upper() == 'FINISHED':
-                                    requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
-                                    print(f"🏁 投稿完了！")
-                                    with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
-                                    stats['mlb_count'] = stats.get('mlb_count', 0) + 1; save_stats(stats); return
+                                    # ✅ 動画公開
+                                    publish_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+                                    if 'id' in publish_res:
+                                        print(f"🏁 投稿完了！ ID: {publish_res['id']}")
+                                        # ✅ 公開直後に自動コメント
+                                        time.sleep(5)
+                                        post_automated_comment(publish_res['id'])
+                                        
+                                        with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
+                                        stats['mlb_count'] = stats.get('mlb_count', 0) + 1; save_stats(stats); return
         except Exception as e: print(f"  ❌ システムエラー: {e}")
     print("😴 終了。")
 
