@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・システム最終形態（クリーンキャプション ＋ 自動コメント）起動...")
+print("🚀 プレイボール速報・システム最終形態（本文復活 ＋ 短文見出し）起動...")
 sys.stdout.flush()
 
 import requests
@@ -23,7 +23,7 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 JPN_KEYWORDS = ["大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto", "佐々木朗希", "佐々木", "roki sasaki", "sasaki", "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish", "村上宗隆", "村上", "munetaka murakami", "murakami", "鈴木誠也", "seiya suzuki", "今永昇太", "shota imanaga", "吉田正尚", "masataka yoshida"]
-BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights", "outing", "talks", "roberts", "manager"]
+BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "talks", "roberts", "manager"]
 
 def get_stats():
     if os.path.exists('stats.json'):
@@ -81,16 +81,18 @@ def shift_srt_time(srt_text, offset_sec):
     return "\n\n".join(final_blocks)
 
 def post_automated_comment(media_id):
-    """【新機能】投稿直後のコメント欄にメッセージを投稿"""
+    """コメント投稿の信頼性を向上"""
     message = "プロフィールのリンクも見てってね！"
     url = f"https://graph.facebook.com/v21.0/{media_id}/comments"
     try:
         res = requests.post(url, data={'message': message, 'access_token': ACCESS_TOKEN}).json()
         if 'id' in res:
-            print(f"💬 コメントを投稿しました: {message}")
+            print(f"💬 コメント成功: {message}")
             return True
+        else:
+            print(f"⚠️ コメント失敗(API応答): {res}")
     except Exception as e:
-        print(f"⚠️ コメント投稿失敗: {e}")
+        print(f"❌ コメント通信エラー: {e}")
     return False
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
@@ -100,8 +102,20 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
         while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
         model = genai.GenerativeModel(model_name)
         
-        sub_prompt = "動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。日本語のみ出力し、必ず [SRT_START] と [SRT_END] で囲め。"
-        prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)] [本文] {sub_prompt} 【ルール】ラベルや###禁止。ハッシュタグ30個。引用：{source_account}"
+        sub_prompt = "動画の英語実況を日本語SRT字幕にせよ。日本語のみ出力。絶対同期。[SRT_START]...[SRT_END]で囲め。"
+        prompt = f"""
+        野球動画({title})を解析し、以下を正確に出力せよ。
+        
+        【出力形式】
+        1行目：数値1つ(開始秒数)のみ
+        2行目：短く簡潔な見出し（例：大谷翔平第10号ホームラン！甘く入ったスライダーを完璧に捉え、右中間スタンドに弾丸ライナーで叩き込む！）
+        3行目：野球関連のハッシュタグ30個
+        
+        【ルール】
+        ・「見出し：」などのラベルや「###」「**」などの装飾は一切禁止。
+        ・{sub_prompt}
+        ・最後に 引用：{source_account} を入れろ。
+        """
         
         response = model.generate_content([prompt, video_file])
         res_text = response.text
@@ -113,21 +127,23 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
             srt_raw = srt_match.group(1).strip()
             res_text = res_text.replace(srt_match.group(0), "")
 
-        clean_text = re.sub(r'(?im)^(\*\*|#|###)?\s*(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)\s*[:：]?\s*', '', res_text).strip()
-        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+        # ✅ パースロジックの刷新：ラベル抹殺を止め、単純な行抽出に変更
+        lines = [l.strip() for l in res_text.split('\n') if l.strip()]
         if not lines: return 0, None, None
         
         start_sec = 0
-        match = re.search(r"(\d+)", lines[0])
-        if match:
-            start_sec = int(match.group(1))
-            ai_caption = "\n".join(lines[1:])
-            # ✅ キャプションへの余計な誘導文は追加せず、クリーンに保つ
-            srt_data = shift_srt_time(srt_raw, start_sec) if srt_raw else None
-        else:
-            ai_caption = "\n".join(lines)
-            srt_data = shift_srt_time(srt_raw, 0) if srt_raw else None
-            
+        ai_caption = ""
+        
+        # 最初の数字行を探す
+        for i, line in enumerate(lines):
+            if re.match(r"^\d+$", line):
+                start_sec = int(line)
+                # その後の行をすべて本文とする（ラベル抹殺フィルタは最小限に適用）
+                raw_body = "\n".join(lines[i+1:])
+                ai_caption = re.sub(r'(?im)^(\*\*|#|###)?\s*(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)\s*[:：]?\s*', '', raw_body).strip()
+                break
+        
+        srt_data = shift_srt_time(srt_raw, start_sec) if srt_raw else None
         return start_sec, ai_caption, srt_data
     except Exception as e:
         print(f"  ⚠️ AI失敗: {e}"); return 0, None, None
@@ -172,7 +188,7 @@ def main():
         if not os.path.exists(temp_input): continue
 
         start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
-        if ai_caption is None: continue
+        if not ai_caption: continue
 
         video_filters = "scale=1134:-2,crop=1080:ih"
         if srt_data:
@@ -195,13 +211,13 @@ def main():
                                 time.sleep(30)
                                 status_res = requests.get(f"https://graph.facebook.com/v21.0/{creation_id}", params={'fields': 'status_code', 'access_token': ACCESS_TOKEN}).json()
                                 if (status_res.get('status_code') or "").upper() == 'FINISHED':
-                                    # ✅ 動画公開
                                     publish_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media_publish", data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
                                     if 'id' in publish_res:
-                                        print(f"🏁 投稿完了！ ID: {publish_res['id']}")
-                                        # ✅ 公開直後に自動コメント
-                                        time.sleep(5)
-                                        post_automated_comment(publish_res['id'])
+                                        media_id = publish_res['id']
+                                        print(f"🏁 投稿完了！ ID: {media_id}")
+                                        # ✅ 待機時間を10秒に延長してコメント投稿
+                                        time.sleep(10)
+                                        post_automated_comment(media_id)
                                         
                                         with open(history_file, 'a') as fh: fh.write(video['id'] + "\n")
                                         stats['mlb_count'] = stats.get('mlb_count', 0) + 1; save_stats(stats); return
