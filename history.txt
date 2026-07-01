@@ -114,3 +114,4 @@ data-viz-shohei-ohtani-s-432-foot-homer
 field-view-shohei-ohtani-s-three-run-home-run-x7402
 gage-jump-ball-to-shohei-ohtani-capture-review
 walker-buehler-in-play-run-s-to-seiya-suzuki
+seiya-suzuki-stays-in-game-after-hit-by-ricochet
