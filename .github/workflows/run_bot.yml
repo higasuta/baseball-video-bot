@@ -24,11 +24,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
+          
       - name: Install Dependencies
         run: |
-          # ✅ プログラムに合わせて google-generativeai をインストールするように修正
-          pip install -U requests google-generativeai yt-dlp
+          pip install -U requests google-genai yt-dlp
 
       - name: Run Bot
         env:
