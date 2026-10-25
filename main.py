@@ -4,12 +4,12 @@ import datetime
 import os
 import time
 import subprocess
-from google import genai # 最新SDK
+from google import genai
 import json
 import re
 
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・MLB自動翻訳システム（2026.08 最終復旧版）起動...")
+print("🚀 プレイボール速報・MLB自動翻訳システム（AIモデル指定バグ修正版）起動...")
 sys.stdout.flush()
 
 # ==========================================
@@ -40,7 +40,6 @@ def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
 
 def shift_srt_time(srt_text, offset_sec):
-    """SRT構造を修復し時間を物理補正"""
     correction = offset_sec + 0.8
     def shift_timestamp(time_str):
         h, m, s_ms = time_str.split(':')
@@ -67,10 +66,30 @@ def shift_srt_time(srt_text, offset_sec):
             except: continue
     return "\n\n".join(final_blocks)
 
-def analyze_video_with_ai(video_path, title, source_account):
+def get_available_flash_model():
+    """2026年最新の利用可能モデルを自動で選定する"""
+    try:
+        model_names = [m.name for m in client.models.list()]
+        priority_models = [
+            "models/gemini-3.5-flash", 
+            "models/gemini-3.1-flash", 
+            "models/gemini-2.5-flash", 
+            "models/gemini-flash-lite-latest",
+            "models/gemini-flash-latest"
+        ]
+        for pm in priority_models:
+            if pm in model_names: 
+                return pm
+        for m in model_names:
+            if 'flash' in m: return m
+        return model_names[0]
+    except Exception as e:
+        print(f"⚠️ モデル取得失敗: {e}")
+        return "models/gemini-flash-latest"
+
+def analyze_video_with_ai(video_path, title, source_account, model_name):
     """最新SDKを使用し、503/429エラーに対するリトライを実装"""
-    print(f"🧠 AI解析開始...")
-    model_name = "gemini-1.5-flash" # 2026年8月現在、最も安定しているモデル
+    print(f"🧠 AI解析開始 (使用モデル: {model_name})...")
     
     for attempt in range(3):
         try:
@@ -84,6 +103,7 @@ def analyze_video_with_ai(video_path, title, source_account):
             sub_prompt = "動画の英語実況を完璧に聞き取り、日本語SRTを作成せよ。日本語のみ。絶対同期。[SRT_START]...[SRT_END]で囲め。"
             prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)] [本文] {sub_prompt} 【ルール】ラベルや###禁止。ハッシュタグ30個。引用：{source_account}"
             
+            # ✅ ここで引数で受け取った正しい model_name を使う
             response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
             res_text = response.text
             client.files.delete(name=uploaded_file.name)
@@ -120,6 +140,7 @@ def analyze_video_with_ai(video_path, title, source_account):
 
 def get_mlb_video(history):
     candidates = []
+    # テストのため14日間に設定
     for day_offset in range(14):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
@@ -155,6 +176,9 @@ def main():
         for f in client.files.list(): client.files.delete(name=f.name)
     except: pass
 
+    # 最新モデルを自動取得
+    flash_model = get_available_flash_model()
+    
     candidates = get_mlb_video(history)
     print(f"📊 ターゲット候補: {len(candidates)}件")
     if not candidates: return
@@ -162,7 +186,6 @@ def main():
     for video in candidates:
         print(f"🎯 ターゲット確定: {video['title']}")
         temp_input = "temp_video.mp4"
-        # 前回の残骸を削除
         if os.path.exists(temp_input): os.remove(temp_input)
         
         subprocess.run(['yt-dlp', '-o', temp_input, '--quiet', video['url']])
@@ -170,7 +193,8 @@ def main():
             print("  ❌ ダウンロード失敗。次へ移ります。")
             continue
 
-        start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'])
+        # ✅ 修正した関数へ正しい引数を渡す
+        start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
         if ai_caption is None:
             print("  ⚠️ 解析不能。スキップします。")
             continue
@@ -191,7 +215,6 @@ def main():
                     res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
                     if res.get('status') == 'success':
                         public_url = res['data']['url'].replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                        # Instagram投稿
                         post_res = requests.post(f"https://graph.facebook.com/v21.0/{INSTA_ID}/media", data={'media_type': 'REELS', 'video_url': public_url, 'caption': ai_caption, 'access_token': ACCESS_TOKEN}).json()
                         if 'id' in post_res:
                             creation_id = post_res['id']
