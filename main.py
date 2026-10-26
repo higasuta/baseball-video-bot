@@ -1,6 +1,6 @@
 import sys
 # 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・MLB自動翻訳システム（動的モデル・完全復元版）起動...")
+print("🚀 プレイボール速報・MLB自動翻訳システム（最新SDK対応・完全同期版）起動...")
 sys.stdout.flush()
 
 import requests
@@ -8,7 +8,7 @@ import datetime
 import os
 import time
 import subprocess
-import google.generativeai as genai
+from google import genai # ✅ 最新SDKを使用
 import json
 import re
 
@@ -19,8 +19,9 @@ INSTA_ID = os.getenv('INSTA_BUSINESS_ID')
 ACCESS_TOKEN = os.getenv('INSTA_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
 JPN_KEYWORDS = ["大谷翔平", "大谷", "shohei ohtani", "ohtani", "山本由伸", "山本", "yoshinobu yamamoto", "yamamoto", "佐々木朗希", "佐々木", "roki sasaki", "sasaki", "ダルビッシュ有", "ダルビッシュ", "yu darvish", "darvish", "村上宗隆", "村上", "munetaka murakami", "murakami", "鈴木誠也", "seiya suzuki", "今永昇太", "shota imanaga", "吉田正尚", "masataka yoshida"]
 BLACK_KEYWORDS = ["probable", "pitchers", "lineup", "interview", "press", "availability", "roster", "update", "alignment", "summary", "preview", "warmup", "positioning", "against", "at bat", "statcast", "recap", "daily", "full highlights", "outing", "talks", "roberts", "manager"]
@@ -37,18 +38,21 @@ def save_stats(stats):
 
 def cleanup_gemini_storage():
     try:
-        for f in genai.list_files(): genai.delete_file(f.name)
+        # 最新SDKの削除コマンド
+        for f in client.files.list(): client.files.delete(name=f.name)
         print("🧹 AIストレージの掃除完了。")
     except: pass
 
 def get_available_flash_model():
     """2026年最新の無料モデルを自動で探し出す"""
     try:
-        model_names = [m.name for m in genai.list_models() if 'flash' in m.name]
+        model_names = [m.name for m in client.models.list()]
         priority_models = ["models/gemini-3.5-flash", "models/gemini-3.1-flash", "models/gemini-2.5-flash", "models/gemini-flash-latest"]
         for pm in priority_models:
             if pm in model_names: return pm
-        return model_names[0] if model_names else "models/gemini-flash-latest"
+        for m in model_names:
+            if 'flash' in m: return m
+        return model_names[0]
     except: return "models/gemini-flash-latest"
 
 def is_japanese(text):
@@ -85,60 +89,76 @@ def shift_srt_time(srt_text, offset_sec):
 
 def analyze_video_with_ai(video_path, title, source_account, model_name):
     print(f"🧠 AI解析中 (使用モデル: {model_name})...")
-    try:
-        video_file = genai.upload_file(path=video_path)
-        while video_file.state.name == "PROCESSING": time.sleep(2); video_file = genai.get_file(video_file.name)
-        model = genai.GenerativeModel(model_name)
-        
-        prompt = f"""
-        野球動画({title})を解析し、以下を出力せよ。
-        1行目：数値1つ(開始秒数)のみ
-        2行目以降：動画の解説本文（見出し、要約、所感を「だ・である」調で詳しく200文字以上）
-        最後：野球関連のハッシュタグ30個
-
-        また、動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。日本語のみ出力。絶対同期。[SRT_START]...[SRT_END]で囲め。
-
-        【ルール】
-        ・「見出し：」などのラベルや「###」「**」などの装飾は一切書くな。
-        ・見出しは短く簡潔に書け（例：大谷翔平第10号ホームラン！甘く入ったスライダーを完璧に捉え、右中間スタンドに叩き込む！）
-        ・最後に 引用：{source_account} を入れろ。
-        """
-        
-        response = model.generate_content([prompt, video_file])
-        res_text = response.text
-        genai.delete_file(video_file.name)
-
-        # 1. 字幕データの抽出
-        srt_raw = None
-        srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
-        if srt_match:
-            srt_raw = srt_match.group(1).strip()
-            res_text = res_text.replace(srt_match.group(0), "")
-
-        # 2. 本文から不要なラベル・装飾を物理抹殺
-        clean_text = re.sub(r'(?im)^(\*\*|#|###)?\s*(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)\s*[:：]?\s*', '', res_text).strip()
-        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-        if not lines: return 0, None, None
-        
-        # 3. 開始秒数と本文の分離、SRTの物理同期
-        start_sec = 0
-        match = re.search(r"(\d+)", lines[0])
-        if match:
-            start_sec = int(match.group(1))
-            ai_caption = "\n".join(lines[1:])
-            srt_data = shift_srt_time(srt_raw, start_sec) if srt_raw else None
-        else:
-            ai_caption = "\n".join(lines)
-            srt_data = shift_srt_time(srt_raw, 0) if srt_raw else None
+    
+    for attempt in range(3):
+        try:
+            with open(video_path, 'rb') as f:
+                uploaded_file = client.files.upload(file=f, config={'mime_type': 'video/mp4'})
             
-        return start_sec, ai_caption, srt_data
-    except Exception as e:
-        print(f"  ⚠️ AI失敗: {e}"); return 0, None, None
+            while uploaded_file.state.name == "PROCESSING":
+                time.sleep(2)
+                uploaded_file = client.files.get(name=uploaded_file.name)
+            
+            prompt = f"""
+            野球動画({title})を解析し、以下を出力せよ。
+            1行目：数値1つ(開始秒数)のみ
+            2行目以降：動画の解説本文（見出し、要約、所感を「だ・である」調で詳しく200文字以上）
+            最後：野球関連のハッシュタグ30個
+
+            また、動画の英語実況を完璧に聞き取り、日本語SRT字幕を作成せよ。日本語のみ出力。絶対同期。[SRT_START]...[SRT_END]で囲め。
+
+            【ルール】
+            ・「見出し：」などのラベルや「###」「**」などの装飾は一切書くな。
+            ・見出しは短く簡潔に書け（例：大谷翔平第10号ホームラン！甘く入ったスライダーを完璧に捉え、右中間スタンドに叩き込む！）
+            ・最後に 引用：{source_account} を入れろ。
+            """
+            
+            response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
+            res_text = response.text
+            client.files.delete(name=uploaded_file.name)
+
+            # 1. 字幕データの抽出
+            srt_raw = None
+            srt_match = re.search(r'\[SRT_START\](.*?)\[SRT_END\]', res_text, re.DOTALL)
+            if srt_match:
+                srt_raw = srt_match.group(1).strip()
+                res_text = res_text.replace(srt_match.group(0), "")
+
+            # 2. 本文から不要なラベル・装飾を物理抹殺
+            clean_text = re.sub(r'(?im)^(\*\*|#|###)?\s*(START|CAPTION|秒数|本文|開始|タイトル|見出し|要約|所感|概要|SRT)\s*[:：]?\s*', '', res_text).strip()
+            lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+            if not lines: return 0, None, None
+            
+            # 3. 開始秒数と本文の分離、SRTの物理同期
+            start_sec = 0
+            match = re.search(r"(\d+)", lines[0])
+            if match:
+                start_sec = int(match.group(1))
+                ai_caption = "\n".join(lines[1:])
+                srt_data = shift_srt_time(srt_raw, start_sec) if srt_raw else None
+            else:
+                ai_caption = "\n".join(lines)
+                srt_data = shift_srt_time(srt_raw, 0) if srt_raw else None
+                
+            return start_sec, ai_caption, srt_data
+
+        except Exception as e:
+            if ("503" in str(e) or "429" in str(e)) and attempt < 2:
+                print(f"  ⚠️ AI混雑中。10秒後に再試行します({attempt+1}/3)...")
+                time.sleep(10)
+                continue
+            
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                print(f"  ❌ 【致命的エラー】無料枠の上限に達しました。数時間後に再試行してください。")
+                sys.exit(1)
+                
+            print(f"  ❌ AI失敗詳細: {e}")
+            return 0, None, None
 
 def get_mlb_video(history):
     candidates = []
-    # 探索範囲は直近4日間
-    for day_offset in range(4):
+    # 探索範囲は直近3日間に固定
+    for day_offset in range(3):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
@@ -160,18 +180,20 @@ def get_mlb_video(history):
     return candidates
 
 def main():
+    if not client:
+        print("❌ GEMINI_API_KEY が設定されていません。")
+        return
+
     stats = get_stats(); history_file = "history.txt"
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
     cleanup_gemini_storage()
-    # ✅ 自動で最新モデルを取得する
     flash_model = get_available_flash_model()
     
     candidates = get_mlb_video(history)
-    if not candidates: 
-        print("😴 MLB新着なし。")
-        return
+    print(f"📊 ターゲット候補: {len(candidates)}件")
+    if not candidates: return
     
     for video in candidates:
         print(f"🎯 ターゲット確定: {video['title']}")
@@ -179,24 +201,28 @@ def main():
         if os.path.exists(temp_input): os.remove(temp_input)
         
         subprocess.run(['yt-dlp', '-o', temp_input, '--quiet', video['url']])
-        if not os.path.exists(temp_input): continue
+        if not os.path.exists(temp_input):
+            print("  ❌ ダウンロード失敗。次へ移ります。")
+            continue
 
-        # ✅ 引数に flash_model を渡す
         start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
-        if ai_caption is None: continue
+        if ai_caption is None:
+            print("  ⚠️ 解析不能。スキップします。")
+            continue
 
+        output_file = "output.mp4"
         video_filters = "scale=1134:-2,crop=1080:ih"
         if srt_data:
             with open("subtitles.srt", "w", encoding="utf-8") as sf: sf.write(srt_data)
             video_filters += ",subtitles=./subtitles.srt:force_style='Fontname=Noto Sans CJK JP,FontSize=22,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=4,Outline=0,MarginV=20'"
-            print("🎨 字幕を映像内に焼き込み中...")
+            print("🎨 字幕焼き込み適用")
 
         filter_complex = f"{video_filters},pad=1080:1920:0:(1920-ih)/2:color=black,setsar=1"
-        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', 'output.mp4'])
+        subprocess.run(['ffmpeg', '-ss', str(start_sec), '-i', temp_input, '-t', '90', '-vf', filter_complex, '-r', '30', '-c:v', 'libx264', '-b:v', '5M', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', output_file])
         
         try:
-            if os.path.exists('output.mp4'):
-                with open('output.mp4', 'rb') as f:
+            if os.path.exists(output_file):
+                with open(output_file, 'rb') as f:
                     res = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f}, timeout=60).json()
                     if res.get('status') == 'success':
                         public_url = res['data']['url'].replace("tmpfiles.org/", "tmpfiles.org/dl/")
