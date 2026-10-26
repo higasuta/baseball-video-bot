@@ -1,4 +1,8 @@
 import sys
+# 1行目からリアルタイムでログを出力
+print("🚀 プレイボール速報・MLB自動翻訳システム（無料枠最適化モデル）起動...")
+sys.stdout.flush()
+
 import requests
 import datetime
 import os
@@ -7,10 +11,6 @@ import subprocess
 from google import genai
 import json
 import re
-
-# 1行目からリアルタイムでログを出力
-print("🚀 プレイボール速報・MLB自動翻訳システム（AIモデル指定バグ修正版）起動...")
-sys.stdout.flush()
 
 # ==========================================
 # 設定・環境変数の読み込み
@@ -35,6 +35,12 @@ def get_stats():
 
 def save_stats(stats):
     with open('stats.json', 'w') as f: json.dump(stats, f)
+
+def cleanup_gemini_storage():
+    try:
+        for f in client.files.list(): client.files.delete(name=f.name)
+        print("🧹 AIストレージの掃除完了。")
+    except: pass
 
 def is_japanese(text):
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
@@ -66,29 +72,9 @@ def shift_srt_time(srt_text, offset_sec):
             except: continue
     return "\n\n".join(final_blocks)
 
-def get_available_flash_model():
-    """2026年最新の利用可能モデルを自動で選定する"""
-    try:
-        model_names = [m.name for m in client.models.list()]
-        priority_models = [
-            "models/gemini-3.5-flash", 
-            "models/gemini-3.1-flash", 
-            "models/gemini-2.5-flash", 
-            "models/gemini-flash-lite-latest",
-            "models/gemini-flash-latest"
-        ]
-        for pm in priority_models:
-            if pm in model_names: 
-                return pm
-        for m in model_names:
-            if 'flash' in m: return m
-        return model_names[0]
-    except Exception as e:
-        print(f"⚠️ モデル取得失敗: {e}")
-        return "models/gemini-flash-latest"
-
-def analyze_video_with_ai(video_path, title, source_account, model_name):
-    """最新SDKを使用し、503/429エラーに対するリトライを実装"""
+def analyze_video_with_ai(video_path, title, source_account):
+    # ✅ 修正：「models/」を付けずに、無料で大量に使えるモデルを直接指定
+    model_name = "gemini-1.5-flash"
     print(f"🧠 AI解析開始 (使用モデル: {model_name})...")
     
     for attempt in range(3):
@@ -103,7 +89,6 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
             sub_prompt = "動画の英語実況を完璧に聞き取り、日本語SRTを作成せよ。日本語のみ。絶対同期。[SRT_START]...[SRT_END]で囲め。"
             prompt = f"野球動画({title})を解析せよ。[数値1つ(開始秒数)] [本文] {sub_prompt} 【ルール】ラベルや###禁止。ハッシュタグ30個。引用：{source_account}"
             
-            # ✅ ここで引数で受け取った正しい model_name を使う
             response = client.models.generate_content(model=model_name, contents=[uploaded_file, prompt])
             res_text = response.text
             client.files.delete(name=uploaded_file.name)
@@ -132,15 +117,20 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
 
         except Exception as e:
             if ("503" in str(e) or "429" in str(e)) and attempt < 2:
-                print(f"  ⚠️ AI混雑中。10秒後に再試行します({attempt+1}/3)...")
+                print(f"  ⚠️ AI混雑・制限中。10秒後に再試行します({attempt+1}/3)...")
                 time.sleep(10)
                 continue
+            
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                print(f"  ❌ 【致命的エラー】無料枠の上限に達しました。システムを緊急停止します。")
+                sys.exit(1)
+                
             print(f"  ❌ AI失敗詳細: {e}")
             return 0, None, None
 
 def get_mlb_video(history):
     candidates = []
-    # テストのため14日間に設定
+    # 探索範囲をテスト用に14日間に戻します（※テスト後は3日に戻すことを推奨）
     for day_offset in range(14):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
@@ -171,13 +161,7 @@ def main():
     if not os.path.exists(history_file): open(history_file, 'w').close()
     with open(history_file, 'r') as f: history = f.read().splitlines()
 
-    # AIストレージ清掃
-    try:
-        for f in client.files.list(): client.files.delete(name=f.name)
-    except: pass
-
-    # 最新モデルを自動取得
-    flash_model = get_available_flash_model()
+    cleanup_gemini_storage()
     
     candidates = get_mlb_video(history)
     print(f"📊 ターゲット候補: {len(candidates)}件")
@@ -193,8 +177,7 @@ def main():
             print("  ❌ ダウンロード失敗。次へ移ります。")
             continue
 
-        # ✅ 修正した関数へ正しい引数を渡す
-        start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'], flash_model)
+        start_sec, ai_caption, srt_data = analyze_video_with_ai(temp_input, video['title'], video['source'])
         if ai_caption is None:
             print("  ⚠️ 解析不能。スキップします。")
             continue
