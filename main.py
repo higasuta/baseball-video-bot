@@ -157,8 +157,8 @@ def analyze_video_with_ai(video_path, title, source_account, model_name):
 
 def get_mlb_video(history):
     candidates = []
-    # 探索範囲は直近3日間に固定
-    for day_offset in range(3):
+    # 探索範囲は直近14日間に固定
+    for day_offset in range(14):
         date_str = (datetime.datetime.now() - datetime.timedelta(days=day_offset)).strftime('%Y-%m-%d')
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&startDate={date_str}&endDate={date_str}"
         try:
